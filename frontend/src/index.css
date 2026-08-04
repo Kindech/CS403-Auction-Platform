@@ -1,10 +1,27 @@
 @import "tailwindcss";
 
+@theme {
+  /* Siam-Auction-inspired palette */
+  --color-ink: #0f172a;
+  --color-ink-muted: #475569;
+  --color-cream: #fafaf7;
+  --color-gold: #c9a961;
+  --color-gold-dark: #a88842;
+  --color-paper: #f5f2ea;
+
+  --font-serif-display: "Playfair Display", "Noto Serif Thai", serif;
+  --font-sans: "Noto Sans Thai", "Inter", system-ui, sans-serif;
+  --font-mono-digits: "JetBrains Mono", monospace;
+
+  --shadow-card: 0 1px 3px 0 rgba(15, 23, 42, 0.06), 0 4px 12px 0 rgba(15, 23, 42, 0.04);
+  --shadow-card-hover: 0 4px 8px 0 rgba(15, 23, 42, 0.08), 0 12px 24px 0 rgba(15, 23, 42, 0.08);
+}
+
 html, body, #root {
   height: 100%;
 }
 
 body {
-  @apply bg-slate-950 text-slate-100;
+  @apply bg-cream text-ink font-sans;
   margin: 0;
 }

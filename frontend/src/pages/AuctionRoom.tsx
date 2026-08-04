@@ -46,7 +46,7 @@ export function AuctionRoom() {
     return () => clearInterval(t);
   }, []);
 
-  if (!item) return <p className="text-slate-400">Loading auction...</p>;
+  if (!item) return <p className="text-ink-muted">กำลังโหลด...</p>;
 
   const ended = item.status === "ended" || state.ended;
   if (ended) {
@@ -73,35 +73,48 @@ export function AuctionRoom() {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 max-w-5xl mx-auto">
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
       <div>
-        <div className="aspect-video bg-slate-800 rounded-lg overflow-hidden mb-4">
+        <div className="relative aspect-4/3 bg-paper rounded-xl overflow-hidden mb-4 border border-slate-100">
           {item.image_url && (
             <img src={item.image_url} alt={item.title} className="w-full h-full object-cover" />
           )}
+          {item.status === "live" && (
+            <span className="absolute top-3 right-3 px-2 py-1 rounded-full bg-ink/80 text-cream text-[10px] backdrop-blur-sm flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
+              LIVE
+            </span>
+          )}
         </div>
-        <h1 className="text-2xl font-semibold">{item.title}</h1>
-        <p className="text-slate-400 mt-1">{item.description}</p>
-        <p className="text-xs text-slate-500 mt-2">
-          Seller: {item.seller_name} · {state.connected ? "🟢 live" : "🟠 reconnecting..."}
+        <h1 className="font-serif-display text-2xl font-bold text-ink">{item.title}</h1>
+        <p className="text-ink-muted mt-2 text-sm">{item.description}</p>
+        <p className="text-xs text-ink-muted/70 mt-3">
+          ผู้ขาย: {item.seller_name} · {state.connected ? "🟢 เชื่อมต่อสด" : "🟠 กำลังเชื่อมต่อใหม่..."}
         </p>
       </div>
 
       <div>
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-center mb-6">
-          <p className="text-sm text-slate-400 uppercase tracking-wide">Current price</p>
-          <p className="text-4xl font-bold my-2">{formatMoney(currentPrice)}</p>
-          <p className="text-sm text-slate-400 mb-4">
-            {state.bidderName ? `Highest bidder: ${state.bidderName}` : "No bids yet"}
+        <div className="rounded-xl border border-slate-100 bg-white shadow-card p-6 text-center mb-6">
+          <p className="text-[10px] uppercase tracking-wider text-ink-muted">ราคาปัจจุบัน</p>
+          <p className="font-mono-digits text-4xl font-bold text-ink my-2">{formatMoney(currentPrice)}</p>
+          <p className="text-sm text-ink-muted mb-4">
+            {state.bidderName ? (
+              <>
+                ผู้เสนอราคาสูงสุด: <span className="text-ink font-medium">{state.bidderName}</span>
+              </>
+            ) : (
+              "ยังไม่มีผู้เสนอราคา"
+            )}
           </p>
-          <p className="text-xl font-mono text-emerald-400">{formatCountdown(endTimeMs, now)}</p>
+          <p className="text-[10px] uppercase tracking-wider text-ink-muted mb-1">สิ้นสุดประมูลใน</p>
+          <p className="font-mono-digits text-xl font-bold text-gold-dark">{formatCountdown(endTimeMs, now)}</p>
 
           {user ? (
             <div className="mt-6 flex gap-2">
               <input
                 type="number"
-                className="flex-1 rounded bg-slate-800 border border-slate-700 px-3 py-2"
-                placeholder={`Min ${formatMoney(minNextBid)}`}
+                className="flex-1 rounded-md bg-cream border border-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/40"
+                placeholder={`ขั้นต่ำ ${formatMoney(minNextBid)}`}
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
                 min={minNextBid}
@@ -109,43 +122,43 @@ export function AuctionRoom() {
               />
               <button
                 onClick={placeBid}
-                className="rounded bg-emerald-600 hover:bg-emerald-500 px-4 py-2 font-medium"
+                className="rounded-full bg-gold text-ink hover:bg-gold-dark font-semibold px-5 py-2.5 text-sm transition-colors"
               >
-                Bid
+                เสนอราคา
               </button>
             </div>
           ) : (
-            <p className="mt-6 text-sm text-slate-400">Log in to place a bid.</p>
+            <p className="mt-6 text-sm text-ink-muted">เข้าสู่ระบบเพื่อเสนอราคา</p>
           )}
           {state.lastRejectReason && (
-            <p className="text-red-400 text-sm mt-3">Rejected: {state.lastRejectReason}</p>
+            <p className="text-red-600 text-sm mt-3">ถูกปฏิเสธ: {state.lastRejectReason}</p>
           )}
         </div>
 
-        <h2 className="text-lg font-medium mb-3">Live bid history</h2>
-        <div className="max-h-80 overflow-y-auto rounded border border-slate-800">
+        <h2 className="text-lg font-serif-display font-semibold text-ink mb-3">ประวัติการเสนอราคาแบบเรียลไทม์</h2>
+        <div className="max-h-80 overflow-y-auto rounded-xl border border-slate-100 bg-white shadow-card">
           <table className="w-full text-sm text-left">
-            <thead className="bg-slate-900 text-slate-400 sticky top-0">
+            <thead className="bg-paper text-ink-muted text-xs uppercase tracking-wider sticky top-0">
               <tr>
-                <th className="px-3 py-2">Bidder</th>
-                <th className="px-3 py-2">Amount</th>
-                <th className="px-3 py-2">Status</th>
+                <th className="px-4 py-2.5">ผู้เสนอราคา</th>
+                <th className="px-4 py-2.5">จำนวนเงิน</th>
+                <th className="px-4 py-2.5">สถานะ</th>
               </tr>
             </thead>
             <tbody>
               {bids.map((b) => (
-                <tr key={b.id} className="border-t border-slate-800">
-                  <td className="px-3 py-2">{b.user_name}</td>
-                  <td className="px-3 py-2">{formatMoney(b.amount)}</td>
-                  <td className={`px-3 py-2 ${b.status === "accepted" ? "text-emerald-400" : "text-red-400"}`}>
-                    {b.status === "accepted" ? "Highest" : "Outbid/Rejected"}
+                <tr key={b.id} className="border-t border-slate-100">
+                  <td className="px-4 py-2.5">{b.user_name}</td>
+                  <td className="px-4 py-2.5 font-mono-digits">{formatMoney(b.amount)}</td>
+                  <td className={`px-4 py-2.5 font-medium ${b.status === "accepted" ? "text-emerald-600" : "text-red-500"}`}>
+                    {b.status === "accepted" ? "สูงสุด" : "ถูกแซง/ปฏิเสธ"}
                   </td>
                 </tr>
               ))}
               {bids.length === 0 && (
                 <tr>
-                  <td colSpan={3} className="px-3 py-4 text-center text-slate-500">
-                    No bids yet
+                  <td colSpan={3} className="px-4 py-6 text-center text-ink-muted">
+                    ยังไม่มีการเสนอราคา
                   </td>
                 </tr>
               )}

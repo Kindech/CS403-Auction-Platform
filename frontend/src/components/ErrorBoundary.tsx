@@ -22,17 +22,17 @@ export class ErrorBoundary extends Component<Props, State> {
   render() {
     if (this.state.error) {
       return (
-        <div className="max-w-lg mx-auto mt-20 text-center">
-          <h1 className="text-xl font-semibold text-red-400 mb-2">Something went wrong</h1>
-          <p className="text-slate-400 text-sm">{this.state.error.message}</p>
+        <div className="max-w-lg mx-auto mt-20 text-center bg-white rounded-xl shadow-card border border-slate-100 p-8">
+          <h1 className="font-serif-display text-xl font-semibold text-red-600 mb-2">เกิดข้อผิดพลาด</h1>
+          <p className="text-ink-muted text-sm">{this.state.error.message}</p>
           <button
-            className="mt-6 rounded bg-slate-800 hover:bg-slate-700 px-4 py-2"
+            className="mt-6 rounded-full bg-ink text-cream hover:bg-ink/90 px-4 py-2 text-sm font-semibold transition-colors"
             onClick={() => {
               this.setState({ error: null });
               window.location.href = "/";
             }}
           >
-            Back to dashboard
+            กลับหน้าหลัก
           </button>
         </div>
       );

@@ -4,7 +4,7 @@ import { useAuth } from "../lib/auth";
 
 export function ProtectedRoute({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
-  if (loading) return <p className="text-slate-400">Loading...</p>;
+  if (loading) return <p className="text-ink-muted">กำลังโหลด...</p>;
   if (!user) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }

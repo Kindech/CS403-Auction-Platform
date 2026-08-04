@@ -8,6 +8,9 @@ function toLocalInputValue(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+const inputCls =
+  "mt-1 w-full rounded-md bg-cream border border-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/40";
+
 export function SellerTools() {
   const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +34,7 @@ export function SellerTools() {
     try {
       setItems((await api.get<Item[]>("/items/mine")) ?? []);
     } catch {
-      setError("Could not load your items");
+      setError("ไม่สามารถโหลดรายการสินค้าของคุณได้");
     }
   }
 
@@ -54,55 +57,59 @@ export function SellerTools() {
       setForm((f) => ({ ...f, title: "", description: "", image_url: "" }));
       await loadItems();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not create item");
+      setError(err instanceof ApiError ? err.message : "ไม่สามารถลงรายการสินค้าได้");
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="max-w-5xl mx-auto">
-      <h1 className="text-2xl font-semibold mb-6">Seller tools</h1>
+    <div>
+      <p className="text-[10px] tracking-[0.2em] text-gold-dark uppercase mb-1">สำหรับผู้ขาย</p>
+      <h1 className="font-serif-display text-2xl font-bold text-ink mb-6">เครื่องมือจัดการสินค้า</h1>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <form onSubmit={onSubmit} className="flex flex-col gap-3 rounded-lg border border-slate-800 bg-slate-900 p-6">
-          <h2 className="text-lg font-medium mb-2">List a new item</h2>
+        <form
+          onSubmit={onSubmit}
+          className="flex flex-col gap-3 rounded-xl border border-slate-100 bg-white shadow-card p-6"
+        >
+          <h2 className="font-serif-display text-lg font-semibold text-ink mb-1">ลงรายการสินค้าใหม่</h2>
           <input
-            className="rounded bg-slate-800 border border-slate-700 px-3 py-2"
-            placeholder="Title"
+            className={inputCls}
+            placeholder="ชื่อสินค้า"
             value={form.title}
             onChange={(e) => setForm({ ...form, title: e.target.value })}
             required
           />
           <textarea
-            className="rounded bg-slate-800 border border-slate-700 px-3 py-2"
-            placeholder="Description"
+            className={inputCls}
+            placeholder="รายละเอียดสินค้า"
             value={form.description}
             onChange={(e) => setForm({ ...form, description: e.target.value })}
           />
           <input
-            className="rounded bg-slate-800 border border-slate-700 px-3 py-2"
-            placeholder="Image URL"
+            className={inputCls}
+            placeholder="URL รูปภาพ"
             value={form.image_url}
             onChange={(e) => setForm({ ...form, image_url: e.target.value })}
           />
           <div className="grid grid-cols-2 gap-3">
-            <label className="text-sm text-slate-400">
-              Starting bid
+            <label className="text-xs uppercase tracking-wider text-ink-muted">
+              ราคาเริ่มต้น
               <input
                 type="number"
-                className="mt-1 w-full rounded bg-slate-800 border border-slate-700 px-3 py-2"
+                className={inputCls}
                 value={form.starting_price}
                 min={1}
                 onChange={(e) => setForm({ ...form, starting_price: Number(e.target.value) })}
                 required
               />
             </label>
-            <label className="text-sm text-slate-400">
-              Bid increment
+            <label className="text-xs uppercase tracking-wider text-ink-muted">
+              หน่วยเพิ่มราคาขั้นต่ำ
               <input
                 type="number"
-                className="mt-1 w-full rounded bg-slate-800 border border-slate-700 px-3 py-2"
+                className={inputCls}
                 value={form.bid_increment}
                 min={1}
                 onChange={(e) => setForm({ ...form, bid_increment: Number(e.target.value) })}
@@ -111,43 +118,43 @@ export function SellerTools() {
             </label>
           </div>
           <div className="grid grid-cols-2 gap-3">
-            <label className="text-sm text-slate-400">
-              Start time
+            <label className="text-xs uppercase tracking-wider text-ink-muted">
+              เวลาเริ่มประมูล
               <input
                 type="datetime-local"
-                className="mt-1 w-full rounded bg-slate-800 border border-slate-700 px-3 py-2"
+                className={inputCls}
                 value={form.start_time}
                 onChange={(e) => setForm({ ...form, start_time: e.target.value })}
                 required
               />
             </label>
-            <label className="text-sm text-slate-400">
-              End time
+            <label className="text-xs uppercase tracking-wider text-ink-muted">
+              เวลาสิ้นสุดประมูล
               <input
                 type="datetime-local"
-                className="mt-1 w-full rounded bg-slate-800 border border-slate-700 px-3 py-2"
+                className={inputCls}
                 value={form.end_time}
                 onChange={(e) => setForm({ ...form, end_time: e.target.value })}
                 required
               />
             </label>
           </div>
-          {error && <p className="text-red-400 text-sm">{error}</p>}
+          {error && <p className="text-red-600 text-sm">{error}</p>}
           <button
             disabled={busy}
-            className="rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-2 font-medium mt-2"
+            className="rounded-full bg-gold text-ink hover:bg-gold-dark disabled:opacity-50 px-4 py-2.5 font-semibold text-sm mt-2 transition-colors"
           >
-            {busy ? "Listing..." : "List item"}
+            {busy ? "กำลังลงรายการ..." : "ลงประมูลสินค้า"}
           </button>
         </form>
 
         <div>
-          <h2 className="text-lg font-medium mb-3">Your items</h2>
+          <h2 className="font-serif-display text-lg font-semibold text-ink mb-3">สินค้าของฉัน</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {items.map((item) => (
               <ItemCard key={item.id} item={item} />
             ))}
-            {items.length === 0 && <p className="text-slate-400">You haven't listed anything yet.</p>}
+            {items.length === 0 && <p className="text-ink-muted">คุณยังไม่ได้ลงรายการสินค้าใดๆ</p>}
           </div>
         </div>
       </div>

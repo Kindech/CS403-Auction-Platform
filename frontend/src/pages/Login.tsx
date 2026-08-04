@@ -26,11 +26,12 @@ export function Login() {
   }
 
   return (
-    <div className="max-w-sm mx-auto mt-12">
-      <h1 className="text-2xl font-semibold mb-6">Log in</h1>
+    <div className="max-w-sm mx-auto mt-8 bg-white rounded-xl shadow-card border border-slate-100 p-8">
+      <p className="text-[10px] tracking-[0.2em] text-gold-dark uppercase mb-1">ยินดีต้อนรับกลับ</p>
+      <h1 className="font-serif-display text-2xl font-bold text-ink mb-6">เข้าสู่ระบบ</h1>
       <form onSubmit={onSubmit} className="flex flex-col gap-4">
         <input
-          className="rounded bg-slate-900 border border-slate-700 px-3 py-2"
+          className="rounded-md bg-cream border border-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/40"
           type="email"
           placeholder="Email"
           value={email}
@@ -38,26 +39,29 @@ export function Login() {
           required
         />
         <input
-          className="rounded bg-slate-900 border border-slate-700 px-3 py-2"
+          className="rounded-md bg-cream border border-slate-200 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-gold/40"
           type="password"
           placeholder="Password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           required
         />
-        {error && <p className="text-red-400 text-sm">{error}</p>}
+        {error && <p className="text-red-600 text-sm">{error}</p>}
         <button
           disabled={busy}
-          className="rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-3 py-2 font-medium"
+          className="rounded-full bg-ink text-cream hover:bg-ink/90 disabled:opacity-50 px-4 py-2.5 font-semibold text-sm transition-colors"
         >
-          {busy ? "Logging in..." : "Log in"}
+          {busy ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}
         </button>
       </form>
-      <p className="text-sm text-slate-400 mt-4">
-        No account? <Link className="text-emerald-400" to="/register">Register</Link>
+      <p className="text-sm text-ink-muted mt-5">
+        ยังไม่มีบัญชี?{" "}
+        <Link className="text-gold-dark font-medium hover:underline" to="/register">
+          สมัครสมาชิก
+        </Link>
       </p>
-      <p className="text-xs text-slate-500 mt-6">
-        Demo accounts: seller@example.com / bidder@example.com, password "password123"
+      <p className="text-xs text-ink-muted/70 mt-6 border-t border-slate-100 pt-4">
+        บัญชีตัวอย่าง: seller@example.com / bidder@example.com — รหัสผ่าน "password123"
       </p>
     </div>
   );
