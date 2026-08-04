@@ -1,0 +1,22 @@
+# Go
+backend/**/*.exe
+backend/**/*.test
+backend/bin/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code local session config (machine-specific, not project source)
+.claude/settings.local.json
+
+# Env overrides
+.env
+.env.*
+!.env.example
