@@ -1,7 +1,7 @@
 x-backend-env: &backend-env
   POSTGRES_URL: postgres://auction:auction@postgres:5432/auction?sslmode=disable
   REDIS_ADDR: redis:6379
-  KAFKA_BROKERS: redpanda:9092
+  KAFKA_BROKERS: kafka:9092
   KAFKA_TOPIC: bid-requests
   JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
   INTERNAL_SECRET: ${INTERNAL_SECRET:-dev-internal-secret-change-me}
@@ -34,33 +34,35 @@ services:
       timeout: 5s
       retries: 10
 
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
-    command:
-      - redpanda
-      - start
-      - --smp=1
-      - --memory=512M
-      - --overprovisioned
-      - --node-id=0
-      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
-      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
-      - --check=false
+  kafka:
+    image: apache/kafka:3.7.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     ports:
       - "9092:9092"
     healthcheck:
-      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
       interval: 5s
       timeout: 5s
       retries: 20
 
   kafka-init:
-    image: docker.redpanda.com/redpandadata/redpanda:v24.2.7
+    image: apache/kafka:3.7.1
     depends_on:
-      redpanda:
+      kafka:
         condition: service_healthy
     entrypoint: >
-      bash -c "rpk topic create bid-requests --partitions 6 --replicas 1 --brokers redpanda:9092 || true"
+      /opt/kafka/bin/kafka-topics.sh --create --if-not-exists
+      --topic bid-requests --partitions 6 --replication-factor 1
+      --bootstrap-server kafka:9092
     restart: "no"
 
   api-1:

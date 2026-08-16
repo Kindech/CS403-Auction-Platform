@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { wsURL } from "./api";
-import type { WSEvent } from "../types";
+import type { Bid, WSEvent } from "../types";
 
 export interface LiveAuctionState {
   price: number | null;
@@ -12,6 +12,7 @@ export interface LiveAuctionState {
   ended: boolean;
   winnerName: string | null;
   finalPrice: number | null;
+  latestBid: Bid | null;
 }
 
 /**
@@ -30,6 +31,7 @@ export function useAuctionSocket(itemID: string | undefined) {
     ended: false,
     winnerName: null,
     finalPrice: null,
+    latestBid: null,
   });
   const socketRef = useRef<WebSocket | null>(null);
 
@@ -54,6 +56,14 @@ export function useAuctionSocket(itemID: string | undefined) {
         setState((s) => {
           switch (data.type) {
             case "sync":
+              return {
+                ...s,
+                price: data.price ?? s.price,
+                bidderName: data.bidder_name ?? s.bidderName,
+                endTimeMs: data.end_time_ms ?? s.endTimeMs,
+                minIncrement: data.min_increment ?? s.minIncrement,
+                lastRejectReason: null,
+              };
             case "price_update":
               return {
                 ...s,
@@ -62,6 +72,22 @@ export function useAuctionSocket(itemID: string | undefined) {
                 endTimeMs: data.end_time_ms ?? s.endTimeMs,
                 minIncrement: data.min_increment ?? s.minIncrement,
                 lastRejectReason: null,
+                // Sourced straight from the broadcast, not re-fetched from
+                // Postgres: bid-worker's audit insert is an async batch (up
+                // to BATCH_INTERVAL later), so refetching here would race it
+                // and show stale/empty history.
+                latestBid:
+                  data.bidder_name != null && data.price != null
+                    ? {
+                        id: `${itemID}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                        item_id: itemID!,
+                        user_id: "",
+                        user_name: data.bidder_name,
+                        amount: data.price,
+                        status: "accepted",
+                        created_at: new Date().toISOString(),
+                      }
+                    : s.latestBid,
               };
             case "bid_rejected":
               return { ...s, lastRejectReason: data.reason ?? "rejected" };

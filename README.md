@@ -19,7 +19,7 @@ decoupled, event-sequenced auction platform designed to survive last-second
                 │  produce             │  produce
                 └──────────┬───────────┘
                     ┌──────▼───────┐
-                    │  Redpanda    │  Kafka-API-compatible broker
+                    │  Kafka       │  message broker
                     │              │  topic "bid-requests", key = item_id
                     └──────┬───────┘  (guarantees strict per-item ordering)
                     ┌──────▼───────┐
@@ -70,7 +70,7 @@ cd deploy
 docker compose up -d --build
 ```
 
-This starts Postgres, Redpanda, Redis, two `api-server` replicas, one
+This starts Postgres, Kafka, Redis, two `api-server` replicas, one
 `bid-worker`, and an nginx container that serves the built frontend and
 proxies `/api` and `/ws` to the `api-*` replicas.
 
@@ -95,7 +95,7 @@ Direct service ports, if you want to bypass nginx while debugging:
 | api-2 | 8082 |
 | PostgreSQL | 5432 (`auction`/`auction`, db `auction`) |
 | Redis | 6379 |
-| Redpanda (Kafka API) | 9092 |
+| Kafka | 9092 |
 
 Stop everything with `docker compose down` (add `-v` to also drop the
 Postgres volume and start from a clean seed next time).
