@@ -100,6 +100,45 @@ Direct service ports, if you want to bypass nginx while debugging:
 Stop everything with `docker compose down` (add `-v` to also drop the
 Postgres volume and start from a clean seed next time).
 
+## Managing the database (pgAdmin)
+
+The stack is PostgreSQL, not Microsoft SQL Server, so SQL Server Management
+Studio can't connect to it directly. Instead, `deploy/docker-compose.yml`
+includes a **pgAdmin** container - a browser-based GUI (tables, query editor,
+row editing) that plays the same role as SSMS, pointed at the `postgres`
+container.
+
+```bash
+cd deploy
+docker compose up -d postgres pgadmin
+```
+
+Open **http://localhost:5050** and log in:
+
+| Field | Value |
+|---|---|
+| Email | `admin@auction.com` (override with `PGADMIN_EMAIL`) |
+| Password | `admin` (override with `PGADMIN_PASSWORD`) |
+
+First time only, register a server (right-click **Servers** → Register →
+Server):
+
+| Field | Value |
+|---|---|
+| Name | anything, e.g. `auction` |
+| Host name/address | `postgres` |
+| Port | `5432` |
+| Maintenance database | `auction` |
+| Username | `auction` |
+| Password | `auction` |
+
+pgAdmin remembers this connection (stored in the `pgadmin-data` volume), so
+you won't need to re-register it on future `docker compose up`s. Once
+connected, expand `auction → Databases → auction → Schemas → public →
+Tables` to browse `users`, `items`, `bids`, and `audit_log` (every
+registration, login, and item-creation action is recorded there - see
+`backend/migrations/0002_audit_log.sql`).
+
 ## Backend development
 
 ```bash

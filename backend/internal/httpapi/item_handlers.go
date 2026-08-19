@@ -73,6 +73,7 @@ func (s *Server) handleCreateItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create item")
 		return
 	}
+	_ = db.LogAudit(r.Context(), s.pool, claims.UserID, "item.create", "item", created.ID, created.Title, r.RemoteAddr)
 
 	// If the item is immediately live, initialize its Redis state right away
 	// so bids can be accepted before the worker's next lifecycle tick.

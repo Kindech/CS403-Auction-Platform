@@ -204,6 +204,23 @@ func ListLiveItems(ctx context.Context, pool *pgxpool.Pool) ([]models.Item, erro
 	return out, rows.Err()
 }
 
+// ---- audit log ----
+
+// LogAudit writes an audit trail entry. userID may be empty for
+// unauthenticated actions (e.g. a failed login attempt).
+func LogAudit(ctx context.Context, pool *pgxpool.Pool, userID, action, entityType, entityID, details, ipAddress string) error {
+	var uid *string
+	if userID != "" {
+		uid = &userID
+	}
+	_, err := pool.Exec(ctx,
+		`INSERT INTO audit_log (user_id, action, entity_type, entity_id, details, ip_address)
+		 VALUES ($1,$2,$3,$4,$5,$6)`,
+		uid, action, entityType, entityID, details, ipAddress,
+	)
+	return err
+}
+
 // ---- bids ----
 
 type BidInsert struct {

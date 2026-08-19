@@ -53,6 +53,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "email already registered")
 		return
 	}
+	_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.register", "user", u.ID, u.Email, r.RemoteAddr)
 
 	token, err := auth.IssueToken(s.cfg.JWTSecret, u.ID, u.DisplayName, tokenTTL)
 	if err != nil {
@@ -77,6 +78,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	u, err := db.GetUserByEmail(r.Context(), s.pool, req.Email)
 	if errors.Is(err, db.ErrNotFound) || (err == nil && !auth.CheckPassword(u.PasswordHash, req.Password)) {
+		_ = db.LogAudit(r.Context(), s.pool, "", "user.login_failed", "user", "", req.Email, r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
@@ -84,6 +86,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "login failed")
 		return
 	}
+	_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login", "user", u.ID, "", r.RemoteAddr)
 
 	token, err := auth.IssueToken(s.cfg.JWTSecret, u.ID, u.DisplayName, tokenTTL)
 	if err != nil {
