@@ -73,7 +73,22 @@ func (h *Hub) BroadcastToRoom(itemID string, ev Event) {
 	}
 }
 
-// SendToUser pushes an event to the single connection matching itemID+userID
+// SendToClient pushes an event to exactly one connection by identity,
+// regardless of UserID - used for the initial "sync" so that two anonymous
+// viewers (both UserID == "") in the same room never receive each other's
+// sync push.
+func (h *Hub) SendToClient(c *Client, ev Event) {
+	payload, err := json.Marshal(ev)
+	if err != nil {
+		log.Printf("ws: marshal event: %v", err)
+		return
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	h.send(c, payload)
+}
+
+// SendToUser pushes an event to every connection matching itemID+userID
 // (used for rejected bids, so we don't waste bandwidth telling everyone else).
 func (h *Hub) SendToUser(itemID, userID string, ev Event) {
 	payload, err := json.Marshal(ev)

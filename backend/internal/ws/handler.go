@@ -36,13 +36,20 @@ var upgrader = websocket.Upgrader{
 // ServeWS upgrades GET /ws/auctions/{itemID}?token=... to a WebSocket,
 // pushes an initial "sync" snapshot (so reconnects always resync to the
 // true current state - see TC-07), then relays inbound bids to Kafka.
+//
+// The token is optional: report §3.2.1 requires that any visitor can watch
+// an auction's live price in real time, and only placing a bid requires an
+// account. A missing/invalid token connects as an anonymous viewer (empty
+// UserID) - readLoop rejects "bid" messages from anonymous connections
+// instead of the whole upgrade being refused.
 func (d *Deps) ServeWS(itemID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
-		claims, err := auth.ParseToken(d.JWTSecret, token)
-		if err != nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
+		var claims auth.Claims
+		if token != "" {
+			if parsed, err := auth.ParseToken(d.JWTSecret, token); err == nil {
+				claims = *parsed
+			}
 		}
 
 		ctx := r.Context()
@@ -70,7 +77,7 @@ func (d *Deps) ServeWS(itemID string) http.HandlerFunc {
 		go d.readLoop(client)
 
 		if st, ok, err := redisstate.Get(context.Background(), d.Redis, itemID); err == nil && ok {
-			d.Hub.SendToUser(itemID, claims.UserID, Event{
+			d.Hub.SendToClient(client, Event{
 				Type:         EventSync,
 				ItemID:       itemID,
 				Price:        st.Price,
@@ -95,7 +102,7 @@ func (d *Deps) readLoop(c *Client) {
 		}
 
 		if !limiter.Allow() {
-			d.Hub.SendToUser(c.ItemID, c.UserID, Event{
+			d.Hub.SendToClient(c, Event{
 				Type: EventBidRejected, ItemID: c.ItemID, Reason: "rate_limited",
 			})
 			continue
@@ -103,6 +110,13 @@ func (d *Deps) readLoop(c *Client) {
 
 		var in inboundBid
 		if err := json.Unmarshal(raw, &in); err != nil || in.Type != "bid" {
+			continue
+		}
+
+		if c.UserID == "" {
+			d.Hub.SendToClient(c, Event{
+				Type: EventBidRejected, ItemID: c.ItemID, Reason: "not_authenticated",
+			})
 			continue
 		}
 
