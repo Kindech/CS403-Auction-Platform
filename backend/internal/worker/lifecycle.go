@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -88,6 +89,27 @@ func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.A
 	}
 	w.notifier.NotifyAll(ev)
 
+	w.logItemEnded(itemID, winnerID, state.BidderName, finalPrice)
+
 	_ = redisstate.Delete(ctx, w.rdb, itemID)
 	log.Printf("worker: finalized item %s (winner=%s price=%v)", itemID, state.BidderName, finalPrice)
+}
+
+// logItemEnded records the auction's outcome in audit_log - who won (if
+// anyone) and the final price - completing the timeline alongside
+// bid.accepted/bid.rejected and the account-activity events.
+func (w *Worker) logItemEnded(itemID string, winnerID *string, winnerName string, finalPrice *float64) {
+	details := "no bids"
+	userID := ""
+	if winnerID != nil {
+		details = fmt.Sprintf("winner=%s price=%.2f", winnerName, *finalPrice)
+		userID = *winnerID
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := db.LogAudit(ctx, w.pool, userID, "item.ended", "item", itemID, details, ""); err != nil {
+			log.Printf("worker: log audit for item %s: %v", itemID, err)
+		}
+	}()
 }
