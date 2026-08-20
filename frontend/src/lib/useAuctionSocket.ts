@@ -13,6 +13,7 @@ export interface LiveAuctionState {
   winnerName: string | null;
   finalPrice: number | null;
   latestBid: Bid | null;
+  outbidNotice: { id: string; price: number; bidderName: string | null } | null;
 }
 
 /**
@@ -32,6 +33,7 @@ export function useAuctionSocket(itemID: string | undefined) {
     winnerName: null,
     finalPrice: null,
     latestBid: null,
+    outbidNotice: null,
   });
   const socketRef = useRef<WebSocket | null>(null);
 
@@ -91,6 +93,15 @@ export function useAuctionSocket(itemID: string | undefined) {
               };
             case "bid_rejected":
               return { ...s, lastRejectReason: data.reason ?? "rejected" };
+            case "outbid":
+              return {
+                ...s,
+                outbidNotice: {
+                  id: `${itemID}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                  price: data.price ?? s.price ?? 0,
+                  bidderName: data.bidder_name ?? null,
+                },
+              };
             case "auction_ended":
               return {
                 ...s,

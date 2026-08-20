@@ -41,7 +41,7 @@ export interface Bid {
 }
 
 export interface WSEvent {
-  type: "sync" | "price_update" | "bid_rejected" | "auction_ended";
+  type: "sync" | "price_update" | "bid_rejected" | "auction_ended" | "outbid";
   item_id: string;
   price?: number;
   bidder_name?: string;

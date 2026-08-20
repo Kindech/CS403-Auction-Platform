@@ -23,6 +23,7 @@ export function AuctionRoom() {
   const [amount, setAmount] = useState<string>("");
   const [now, setNow] = useState(() => Date.now());
   const [popup, setPopup] = useState<string | null>(null);
+  const [infoPopup, setInfoPopup] = useState<string | null>(null);
 
   const { state, sendBid } = useAuctionSocket(id);
 
@@ -51,6 +52,19 @@ export function AuctionRoom() {
     if (!state.lastRejectReason) return;
     setPopup(REJECT_MESSAGES[state.lastRejectReason] ?? `การเสนอราคาถูกปฏิเสธ: ${state.lastRejectReason}`);
   }, [state.lastRejectReason]);
+
+  useEffect(() => {
+    if (!infoPopup) return;
+    const t = setTimeout(() => setInfoPopup(null), 5000);
+    return () => clearTimeout(t);
+  }, [infoPopup]);
+
+  // Only the person who just got overtaken gets this - the server only
+  // sends "outbid" targeted to the previous leader, not the whole room.
+  useEffect(() => {
+    if (!state.outbidNotice) return;
+    setInfoPopup(`คุณถูกแซงราคาแล้ว! ราคาล่าสุดคือ ${formatMoney(state.outbidNotice.price)}`);
+  }, [state.outbidNotice]);
 
   async function refreshBids() {
     if (!id) return;
@@ -97,6 +111,20 @@ export function AuctionRoom() {
         </span>
         <p className="text-sm text-ink flex-1">{popup}</p>
         <button onClick={() => setPopup(null)} className="text-ink-muted hover:text-ink text-sm" aria-label="ปิด">
+          ✕
+        </button>
+      </div>
+    </div>
+  );
+
+  const infoPopupEl = infoPopup && (
+    <div className="fixed inset-x-0 top-20 z-50 flex justify-center px-4">
+      <div className="max-w-md w-full rounded-xl border border-blue-200 bg-white shadow-card-hover px-4 py-3 flex items-start gap-3">
+        <span className="text-blue-500 mt-0.5" aria-hidden>
+          🔔
+        </span>
+        <p className="text-sm text-ink flex-1">{infoPopup}</p>
+        <button onClick={() => setInfoPopup(null)} className="text-ink-muted hover:text-ink text-sm" aria-label="ปิด">
           ✕
         </button>
       </div>
@@ -166,6 +194,7 @@ export function AuctionRoom() {
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
       {rejectPopup}
+      {infoPopupEl}
       <div>
         <div className="relative aspect-4/3 bg-paper rounded-xl overflow-hidden mb-4 border border-slate-100">
           {item.image_url && (

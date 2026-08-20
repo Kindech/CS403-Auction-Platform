@@ -137,6 +137,17 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 	})
 	w.logBidDecision(req, true, "")
 
+	// The person who was leading before this bid just got overtaken - tell
+	// them directly (not the whole room) so they don't have to notice it
+	// themselves from the price alone. New leader's name goes out masked:
+	// the recipient here is never that person by definition.
+	if state.BidderID != "" && state.BidderID != req.UserID {
+		w.notifier.NotifyAll(notifyEvent{
+			Type: "outbid", ItemID: req.ItemID, TargetUserID: state.BidderID,
+			Price: out.NewState.Price, BidderName: models.MaskDisplayName(out.NewState.BidderName),
+		})
+	}
+
 	if out.SoftExtended {
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
