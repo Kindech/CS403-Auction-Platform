@@ -1,5 +1,7 @@
 # Real-time Auction Bidding System
 
+[![CI](https://github.com/Kindech/CS403-Auction-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Kindech/CS403-Auction-Platform/actions/workflows/ci.yml)
+
 A working implementation of the architecture described in *CS303_Report_68-2_20_ssr-s2.pdf*
 ("ระบบเสนอราคาประมูลแบบเรียลไทม์" / Real-time Auction Bidding System): a
 decoupled, event-sequenced auction platform designed to survive last-second
@@ -51,6 +53,19 @@ committed *after* its audit record is durably written to Postgres. If
 `bid-worker` dies mid-batch, those messages are simply re-delivered to
 whichever instance replaces it (report §2.6.4). See `loadtest/chaos/tc06_worker_crash_replay.sh`.
 
+**Anyone can watch, only accounts can bid**: report §3.2.1 only requires an
+account to place a bid, not to see prices update live. The WS handshake
+never requires a token - a missing/invalid one just connects as an
+anonymous viewer, who still gets every `sync`/`price_update` push in real
+time but has any `bid` message rejected with `not_authenticated`.
+
+**Names are masked, eBay-style**: every bidder/winner name reaching an API
+response or WS push is `models.MaskDisplayName`'d (`"Beer"` → `"B***r"`)
+for anyone except that name's owner - live price updates, bid history, item
+listings, and the winner announcement all go through it. The database
+itself is untouched; masking happens only in the response-serialization
+layer, per request/per recipient.
+
 ## Repo layout
 
 ```
@@ -59,6 +74,7 @@ backend/            Go module: cmd/api-server, cmd/bid-worker, internal/*
 frontend/            React + Vite + TypeScript + Tailwind SPA
 deploy/              docker-compose.yml, Dockerfiles, nginx.conf
 loadtest/            k6 + chaos scripts implementing the report's test plan
+.github/workflows/   CI: go vet/build/test + frontend build, on every push
 ```
 
 ## Running it
@@ -135,21 +151,39 @@ Server):
 pgAdmin remembers this connection (stored in the `pgadmin-data` volume), so
 you won't need to re-register it on future `docker compose up`s. Once
 connected, expand `auction → Databases → auction → Schemas → public →
-Tables` to browse `users`, `items`, `bids`, and `audit_log` (every
-registration, login, and item-creation action is recorded there - see
-`backend/migrations/0002_audit_log.sql`).
+Tables` to browse `users`, `items`, `bids`, and `audit_log`.
+
+`audit_log` (`backend/migrations/0002_audit_log.sql`) is a single
+chronological timeline across the whole account/auction lifecycle -
+`user.register`, `user.login`, `user.login_failed`, `user.login_locked`
+(see the lockout note below), `item.create`, `bid.accepted`,
+`bid.rejected` (with the reason in `details`), and `item.ended` (winner
+and final price, or `"no bids"`). `bids` stays the per-item audit trail
+the report itself requires (§3.2.1); `audit_log` is the broader one.
+
+Migrations only auto-run against a brand-new Postgres volume
+(`docker-entrypoint-initdb.d` only fires on first init). If you're
+updating an existing stack rather than starting fresh, apply new
+migration files by hand instead of losing data with `docker compose down
+-v`:
+
+```bash
+docker compose exec -T postgres psql -U auction -d auction -f - < ../backend/migrations/0003_login_lockout.sql
+```
 
 ## Backend development
 
 ```bash
 cd backend
-go test ./...           # unit tests for internal/decision (no services needed)
+go vet ./...
 go build ./...
+go test ./... -v         # internal/decision + internal/models, no services needed
 ```
 
 `internal/decision` holds the pure bid-adjudication function (accept/reject,
-anti-snipe boundary, equal-bid races) with no I/O, so its tests run instantly
-and cover the correctness properties the whole architecture depends on.
+anti-snipe boundary, equal-bid races) and `internal/models` holds
+`MaskDisplayName` - both have no I/O, so their tests run instantly and cover
+the correctness properties the rest of the app depends on.
 
 Key environment variables (see `internal/config/config.go` for the full
 list and defaults, and `deploy/docker-compose.yml` for how they're wired):
@@ -161,6 +195,14 @@ list and defaults, and `deploy/docker-compose.yml` for how they're wired):
 | `PEER_INTERNAL_URLS` | (bid-worker only) every `api-*` instance's internal base URL, for direct broadcast |
 | `BID_RATE_LIMIT_PER_SEC` | per-WS-connection bid throttle (report NFR: 10/s) |
 | `ANTI_SNIPE_WINDOW` / `ANTI_SNIPE_EXTENSION` | soft-close window and extension length |
+
+Login lockout (`maxFailedLoginAttempts` / `loginLockoutDuration` in
+`internal/httpapi/auth_handlers.go`, not env-configurable) locks an account
+for 15 minutes after 5 wrong passwords in a row - the correct password is
+rejected too while locked, without even being checked, so a lockout can't
+be extended by guessing. `RegisterFailedLogin` does the increment-and-maybe-
+lock atomically in one `UPDATE`, so concurrent attempts can't race past the
+threshold.
 
 ## Frontend development
 
@@ -174,6 +216,12 @@ Pages implement every screen from report §3.6: register/login, dashboard
 (live/upcoming/ended listings with countdowns), the live auction room
 (bidding console + live bid history over WebSocket), winner announcement,
 seller tools (create + track listings), and personal bid history.
+
+The live auction room shows two distinct popups over WebSocket events: a red
+one for your own rejected bids (too low, auction closed, rate-limited, not
+logged in), and a separate blue one when someone else overtakes the price
+you were leading at (`outbid` event, targeted only at the previous leader -
+everyone else just sees the normal price update).
 
 ## Load & correctness testing
 
@@ -214,6 +262,22 @@ working fine) because Docker Desktop's host↔container port-forwarding layer
 accumulates stale connection state. If that happens, `docker compose restart
 nginx api-1 api-2` clears it immediately - this was reproduced and confirmed
 during development, it is not an application-level bug.
+
+## Continuous Integration
+
+`.github/workflows/ci.yml` runs on every push/PR to any branch, two jobs in
+parallel:
+
+| Job | Steps |
+|---|---|
+| Backend | `go vet ./...` → `go build ./...` → `go test ./... -v` |
+| Frontend | `npm ci` → `npm run build` (`tsc -b` type-checks, then `vite build`) |
+
+No live services required - both jobs run against a clean checkout with
+nothing else running, matching how `internal/decision`/`internal/models`
+and the frontend build are meant to be verified. Check the **Actions** tab
+on GitHub for run history; the badge at the top of this file reflects the
+latest run on whichever branch GitHub picks by default.
 
 ## What's intentionally out of scope
 
