@@ -42,8 +42,9 @@ func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to get item")
 		return
 	}
-	s.attachLivePrices(r, []models.Item{item})
-	writeJSON(w, http.StatusOK, item)
+	items := []models.Item{item}
+	s.attachLivePrices(r, items)
+	writeJSON(w, http.StatusOK, items[0])
 }
 
 func (s *Server) handleCreateItem(w http.ResponseWriter, r *http.Request) {
