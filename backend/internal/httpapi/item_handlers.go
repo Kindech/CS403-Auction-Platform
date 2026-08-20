@@ -103,6 +103,12 @@ func (s *Server) handleItemBids(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list bids")
 		return
 	}
+	viewerID := s.optionalUserID(r)
+	for i := range bids {
+		if bids[i].UserID != viewerID {
+			bids[i].UserName = models.MaskDisplayName(bids[i].UserName)
+		}
+	}
 	writeJSON(w, http.StatusOK, bids)
 }
 

@@ -86,6 +86,7 @@ func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.A
 	if finalPrice != nil {
 		ev.FinalPrice = *finalPrice
 		ev.WinnerName = state.BidderName
+		ev.NameOwnerID = *winnerID
 	}
 	w.notifier.NotifyAll(ev)
 

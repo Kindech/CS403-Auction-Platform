@@ -6,6 +6,8 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+
+	"auction/backend/internal/models"
 )
 
 type Client struct {
@@ -60,15 +62,41 @@ func (h *Hub) send(c *Client, payload []byte) {
 
 // BroadcastToRoom pushes an event to every client currently subscribed to
 // the given item (used for accepted bids, extensions, and auction end).
+//
+// When ev.NameOwnerID is set, BidderName/WinnerName is privacy-masked
+// (see models.MaskDisplayName) for every recipient except that one owner -
+// computed as at most two payload variants total, not one marshal per
+// connection.
 func (h *Hub) BroadcastToRoom(itemID string, ev Event) {
-	payload, err := json.Marshal(ev)
+	unmasked, err := json.Marshal(ev)
 	if err != nil {
 		log.Printf("ws: marshal event: %v", err)
 		return
 	}
+
+	var masked []byte
+	if ev.NameOwnerID != "" {
+		maskedEv := ev
+		if maskedEv.BidderName != "" {
+			maskedEv.BidderName = models.MaskDisplayName(maskedEv.BidderName)
+		}
+		if maskedEv.WinnerName != "" {
+			maskedEv.WinnerName = models.MaskDisplayName(maskedEv.WinnerName)
+		}
+		masked, err = json.Marshal(maskedEv)
+		if err != nil {
+			log.Printf("ws: marshal masked event: %v", err)
+			masked = unmasked
+		}
+	}
+
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	for c := range h.rooms[itemID] {
+		payload := unmasked
+		if masked != nil && c.UserID != ev.NameOwnerID {
+			payload = masked
+		}
 		h.send(c, payload)
 	}
 }

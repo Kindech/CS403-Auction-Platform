@@ -27,6 +27,9 @@ type notifyEvent struct {
 	Reason       string  `json:"reason,omitempty"`
 	WinnerName   string  `json:"winner_name,omitempty"`
 	FinalPrice   float64 `json:"final_price,omitempty"`
+	// NameOwnerID: the user ID that BidderName/WinnerName belongs to, so
+	// each api-server can mask it for every other viewer in the room.
+	NameOwnerID string `json:"name_owner_id,omitempty"`
 }
 
 type Notifier struct {

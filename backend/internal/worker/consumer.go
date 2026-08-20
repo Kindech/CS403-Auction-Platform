@@ -133,7 +133,7 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 		Type: "price_update", ItemID: req.ItemID,
 		Price: out.NewState.Price, BidderName: out.NewState.BidderName,
 		EndTimeMs: out.NewState.EndTimeMs, MinIncrement: out.NewState.MinIncrement,
-		SoftExtended: out.SoftExtended,
+		SoftExtended: out.SoftExtended, NameOwnerID: out.NewState.BidderID,
 	})
 	w.logBidDecision(req, true, "")
 

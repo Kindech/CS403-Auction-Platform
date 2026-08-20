@@ -77,11 +77,15 @@ func (d *Deps) ServeWS(itemID string) http.HandlerFunc {
 		go d.readLoop(client)
 
 		if st, ok, err := redisstate.Get(context.Background(), d.Redis, itemID); err == nil && ok {
+			bidderName := st.BidderName
+			if bidderName != "" && st.BidderID != claims.UserID {
+				bidderName = models.MaskDisplayName(bidderName)
+			}
 			d.Hub.SendToClient(client, Event{
 				Type:         EventSync,
 				ItemID:       itemID,
 				Price:        st.Price,
-				BidderName:   st.BidderName,
+				BidderName:   bidderName,
 				EndTimeMs:    st.EndTimeMs,
 				MinIncrement: st.MinIncrement,
 			})

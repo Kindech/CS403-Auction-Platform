@@ -19,6 +19,7 @@ type internalEvent struct {
 	Reason       string  `json:"reason,omitempty"`
 	WinnerName   string  `json:"winner_name,omitempty"`
 	FinalPrice   float64 `json:"final_price,omitempty"`
+	NameOwnerID  string  `json:"name_owner_id,omitempty"`
 }
 
 // ServeInternalEvents receives fan-out notifications from bid-worker and
@@ -45,6 +46,7 @@ func (d *Deps) ServeInternalEvents(w http.ResponseWriter, r *http.Request) {
 		Reason:       in.Reason,
 		WinnerName:   in.WinnerName,
 		FinalPrice:   in.FinalPrice,
+		NameOwnerID:  in.NameOwnerID,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }

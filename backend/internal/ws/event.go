@@ -23,6 +23,12 @@ type Event struct {
 	// auction_ended
 	WinnerName string  `json:"winner_name,omitempty"`
 	FinalPrice float64 `json:"final_price,omitempty"`
+
+	// NameOwnerID identifies whose name BidderName/WinnerName belongs to.
+	// BroadcastToRoom masks that name (see models.MaskDisplayName) for every
+	// recipient except the connection whose UserID matches - never
+	// serialized, it only steers server-side masking before marshal.
+	NameOwnerID string `json:"-"`
 }
 
 const (
