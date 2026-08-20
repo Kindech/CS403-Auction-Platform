@@ -3,11 +3,13 @@ package models
 import "time"
 
 type User struct {
-	ID           string    `json:"id"`
-	Email        string    `json:"email"`
-	PasswordHash string    `json:"-"`
-	DisplayName  string    `json:"display_name"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID                  string     `json:"id"`
+	Email               string     `json:"email"`
+	PasswordHash        string     `json:"-"`
+	DisplayName         string     `json:"display_name"`
+	CreatedAt           time.Time  `json:"created_at"`
+	FailedLoginAttempts int        `json:"-"`
+	LockedUntil         *time.Time `json:"-"`
 }
 
 type ItemStatus string

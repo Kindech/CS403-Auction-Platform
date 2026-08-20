@@ -28,13 +28,44 @@ func CreateUser(ctx context.Context, pool *pgxpool.Pool, email, passwordHash, di
 func GetUserByEmail(ctx context.Context, pool *pgxpool.Pool, email string) (models.User, error) {
 	var u models.User
 	err := pool.QueryRow(ctx,
-		`SELECT id, email, password_hash, display_name, created_at FROM users WHERE email=$1`,
+		`SELECT id, email, password_hash, display_name, created_at, failed_login_attempts, locked_until
+		 FROM users WHERE email=$1`,
 		email,
-	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt)
+	).Scan(&u.ID, &u.Email, &u.PasswordHash, &u.DisplayName, &u.CreatedAt, &u.FailedLoginAttempts, &u.LockedUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return u, ErrNotFound
 	}
 	return u, err
+}
+
+// RegisterFailedLogin atomically increments the account's failed-attempt
+// counter and, once it reaches maxAttempts, locks the account for
+// lockoutDuration and resets the counter for the next window. Returns
+// whether this call was the one that triggered the lock.
+func RegisterFailedLogin(ctx context.Context, pool *pgxpool.Pool, userID string, maxAttempts int, lockoutDuration time.Duration) (justLocked bool, err error) {
+	err = pool.QueryRow(ctx, `
+		WITH next AS (
+			SELECT failed_login_attempts + 1 AS attempts FROM users WHERE id = $1
+		)
+		UPDATE users u
+		SET failed_login_attempts = CASE WHEN next.attempts >= $2 THEN 0 ELSE next.attempts END,
+		    locked_until = CASE WHEN next.attempts >= $2 THEN now() + make_interval(secs => $3) ELSE u.locked_until END
+		FROM next
+		WHERE u.id = $1
+		RETURNING next.attempts >= $2`,
+		userID, maxAttempts, lockoutDuration.Seconds(),
+	).Scan(&justLocked)
+	return justLocked, err
+}
+
+// ResetFailedLogins clears the failed-attempt counter and any active lock -
+// called after a successful login.
+func ResetFailedLogins(ctx context.Context, pool *pgxpool.Pool, userID string) error {
+	_, err := pool.Exec(ctx,
+		`UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1`,
+		userID,
+	)
+	return err
 }
 
 func GetUserByID(ctx context.Context, pool *pgxpool.Pool, id string) (models.User, error) {

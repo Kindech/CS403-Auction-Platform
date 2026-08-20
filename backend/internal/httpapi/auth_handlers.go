@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -11,6 +12,13 @@ import (
 )
 
 const tokenTTL = 24 * time.Hour
+
+// Brute-force protection: lock an account out for a while after too many
+// wrong passwords in a row.
+const (
+	maxFailedLoginAttempts = 5
+	loginLockoutDuration   = 15 * time.Minute
+)
 
 type registerRequest struct {
 	Email       string `json:"email"`
@@ -77,7 +85,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 
 	u, err := db.GetUserByEmail(r.Context(), s.pool, req.Email)
-	if errors.Is(err, db.ErrNotFound) || (err == nil && !auth.CheckPassword(u.PasswordHash, req.Password)) {
+	if errors.Is(err, db.ErrNotFound) {
 		_ = db.LogAudit(r.Context(), s.pool, "", "user.login_failed", "user", "", req.Email, r.RemoteAddr)
 		writeError(w, http.StatusUnauthorized, "invalid email or password")
 		return
@@ -85,6 +93,31 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "login failed")
 		return
+	}
+
+	if u.LockedUntil != nil && u.LockedUntil.After(time.Now()) {
+		_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login_locked", "user", u.ID, "", r.RemoteAddr)
+		writeError(w, http.StatusTooManyRequests, "too many failed attempts - account is temporarily locked, try again later")
+		return
+	}
+
+	if !auth.CheckPassword(u.PasswordHash, req.Password) {
+		justLocked, lockErr := db.RegisterFailedLogin(r.Context(), s.pool, u.ID, maxFailedLoginAttempts, loginLockoutDuration)
+		if lockErr != nil {
+			log.Printf("httpapi: register failed login for %s: %v", u.ID, lockErr)
+		}
+		_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login_failed", "user", u.ID, "", r.RemoteAddr)
+		if justLocked {
+			_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login_locked", "user", u.ID, "", r.RemoteAddr)
+			writeError(w, http.StatusTooManyRequests, "too many failed attempts - account is temporarily locked, try again later")
+			return
+		}
+		writeError(w, http.StatusUnauthorized, "invalid email or password")
+		return
+	}
+
+	if err := db.ResetFailedLogins(r.Context(), s.pool, u.ID); err != nil {
+		log.Printf("httpapi: reset failed logins for %s: %v", u.ID, err)
 	}
 	_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login", "user", u.ID, "", r.RemoteAddr)
 
