@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -99,16 +100,19 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 // handleBid adjudicates one bid: read state, decide, write state, notify.
-// It never touches Postgres directly - that happens in flush() so a slow
-// disk write can never add latency to the real-time broadcast path.
+// It never blocks on Postgres itself - the audit_log/bids writes it kicks
+// off run in their own goroutines so a slow disk write can never add
+// latency to the real-time broadcast path.
 func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidInsert {
 	state, ok, err := redisstate.Get(ctx, w.rdb, req.ItemID)
 	if err != nil {
 		log.Printf("worker: redis get failed for item %s: %v", req.ItemID, err)
+		w.logBidDecision(req, false, "internal_error")
 		return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: "internal_error", At: req.Timestamp}
 	}
 	if !ok {
 		w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: "auction_not_live"})
+		w.logBidDecision(req, false, "auction_not_live")
 		return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: "auction_not_live", At: req.Timestamp}
 	}
 
@@ -117,6 +121,7 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 
 	if !out.Accepted {
 		w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: out.Reason})
+		w.logBidDecision(req, false, out.Reason)
 		return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: out.Reason, At: req.Timestamp}
 	}
 
@@ -130,6 +135,7 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 		EndTimeMs: out.NewState.EndTimeMs, MinIncrement: out.NewState.MinIncrement,
 		SoftExtended: out.SoftExtended,
 	})
+	w.logBidDecision(req, true, "")
 
 	if out.SoftExtended {
 		go func() {
@@ -142,6 +148,26 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 	}
 
 	return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidAccepted, At: req.Timestamp}
+}
+
+// logBidDecision records the bid-adjudication outcome in audit_log - a
+// chronological view of every decision the worker makes, separate from
+// (and complementary to) the per-item bids table. Fire-and-forget on
+// purpose: never let an audit write add latency to bid adjudication.
+func (w *Worker) logBidDecision(req models.BidRequest, accepted bool, reason string) {
+	action := "bid.accepted"
+	details := fmt.Sprintf("amount=%.2f", req.Amount)
+	if !accepted {
+		action = "bid.rejected"
+		details = fmt.Sprintf("amount=%.2f reason=%s", req.Amount, reason)
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := db.LogAudit(ctx, w.pool, req.UserID, action, "item", req.ItemID, details, ""); err != nil {
+			log.Printf("worker: log audit for item %s: %v", req.ItemID, err)
+		}
+	}()
 }
 
 // flush durably writes the audit batch to Postgres and only then commits
