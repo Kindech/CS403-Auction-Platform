@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"auction/backend/internal/db"
+	"auction/backend/internal/metrics"
 	"auction/backend/internal/models"
 	"auction/backend/internal/redisstate"
 )
@@ -83,11 +84,14 @@ func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.A
 	}
 
 	ev := notifyEvent{Type: "auction_ended", ItemID: itemID, BidderName: state.BidderName}
+	outcome := "unsold"
 	if finalPrice != nil {
 		ev.FinalPrice = *finalPrice
 		ev.WinnerName = state.BidderName
 		ev.NameOwnerID = *winnerID
+		outcome = "sold"
 	}
+	metrics.ItemsFinalizedTotal.WithLabelValues(outcome).Inc()
 	w.notifier.NotifyAll(ev)
 
 	w.logItemEnded(itemID, winnerID, state.BidderName, finalPrice)

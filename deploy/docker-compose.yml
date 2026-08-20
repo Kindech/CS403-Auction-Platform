@@ -142,6 +142,37 @@ services:
       api-2:
         condition: service_started
     restart: unless-stopped
+    ports:
+      - "9101:9101" # metrics
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-remote-write-receiver # lets k6 push load-test metrics directly
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api-1
+      - api-2
+      - bid-worker
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
 
   nginx:
     build:
@@ -156,3 +187,5 @@ services:
 volumes:
   postgres-data:
   pgadmin-data:
+  prometheus-data:
+  grafana-data:

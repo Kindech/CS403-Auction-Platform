@@ -7,6 +7,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"auction/backend/internal/metrics"
 	"auction/backend/internal/models"
 )
 
@@ -38,6 +39,7 @@ func (h *Hub) Register(c *Client) {
 		h.rooms[c.ItemID] = make(map[*Client]bool)
 	}
 	h.rooms[c.ItemID][c] = true
+	metrics.WSConnectionsActive.Inc()
 }
 
 func (h *Hub) Unregister(c *Client) {
@@ -49,6 +51,7 @@ func (h *Hub) Unregister(c *Client) {
 			delete(h.rooms, c.ItemID)
 		}
 	}
+	metrics.WSConnectionsActive.Dec()
 	close(c.Send)
 }
 

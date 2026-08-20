@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os/signal"
 	"syscall"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"auction/backend/internal/config"
 	"auction/backend/internal/db"
@@ -35,6 +38,16 @@ func main() {
 		log.Println("worker: WARNING no PEER_INTERNAL_URLS configured - bids will be adjudicated but never broadcast")
 	}
 	notifier := worker.NewNotifier(cfg.PeerInternalURLs, cfg.InternalSecret)
+
+	go func() {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", promhttp.Handler())
+		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+		log.Printf("bid-worker metrics listening on %s", cfg.MetricsAddr)
+		if err := http.ListenAndServe(cfg.MetricsAddr, mux); err != nil {
+			log.Printf("bid-worker: metrics server stopped: %v", err)
+		}
+	}()
 
 	w := worker.New(cfg, pool, rdb, consumer, notifier)
 	log.Printf("bid-worker started (group=%s topic=%s anti-snipe=%s/+%s peers=%v)",

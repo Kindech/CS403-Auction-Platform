@@ -6,6 +6,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 
 	"auction/backend/internal/config"
@@ -25,9 +26,10 @@ func NewServer(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, wsDeps 
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(chimw.Logger, chimw.Recoverer, corsMiddleware(s.cfg.CORSOrigin))
+	r.Use(chimw.Logger, chimw.Recoverer, corsMiddleware(s.cfg.CORSOrigin), metricsMiddleware)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/auth/register", s.handleRegister)

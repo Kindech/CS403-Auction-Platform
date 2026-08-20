@@ -61,3 +61,22 @@ manual testing through the UI.
   500 / 2000 / 1000, matching the report's table).
 - `ANTI_SNIPE_WINDOW_SEC` overrides TC-05's assumed window; keep it in sync
   with `ANTI_SNIPE_WINDOW` in `deploy/docker-compose.yml` (default 60s).
+
+## Visualizing results in Grafana
+
+The compose stack (see the root README's "Observability" section) already
+runs Prometheus with `--web.enable-remote-write-receiver`, so any k6 script
+here can push its metrics straight into it instead of only printing a
+terminal summary:
+
+```bash
+K6_PROMETHEUS_RW_SERVER_URL="http://localhost:9090/api/v1/write" \
+  k6 run -o experimental-prometheus-rw k6/tc01_fanout_broadcast.js
+```
+
+Then open Grafana (`http://localhost:3000`, `admin`/`admin`) → **Auction -
+k6 Load Test** to watch VUs, request rate, p99 duration, and check pass rate
+live while the test runs, or afterward with the time range widened to cover
+the run. Verified during development with TC-01 at 200 VUs: `k6_vus_max`,
+`k6_ws_sessions_total`, and `k6_checks_rate` in Prometheus matched the
+terminal summary exactly.

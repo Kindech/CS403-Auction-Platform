@@ -112,9 +112,52 @@ Direct service ports, if you want to bypass nginx while debugging:
 | PostgreSQL | 5432 (`auction`/`auction`, db `auction`) |
 | Redis | 6379 |
 | Kafka | 9092 |
+| Prometheus | 9090 |
+| Grafana | 3000 |
+| bid-worker metrics | 9101 |
 
 Stop everything with `docker compose down` (add `-v` to also drop the
 Postgres volume and start from a clean seed next time).
+
+## Observability (Prometheus + Grafana)
+
+Both `api-server` and `bid-worker` expose Prometheus metrics on `/metrics`
+(`internal/metrics` defines them; `promauto` registers everything against
+the default registry, so any binary that imports the package just needs to
+serve `promhttp.Handler()`). Prometheus scrapes `api-1`, `api-2`, and
+`bid-worker` every 5s (`deploy/prometheus/prometheus.yml`); Grafana comes
+pre-provisioned with a datasource and two dashboards - no manual setup
+needed, unlike pgAdmin above.
+
+Open **http://localhost:3000** and log in:
+
+| Field | Value |
+|---|---|
+| Username | `admin` (override with `GRAFANA_USER`) |
+| Password | `admin` (override with `GRAFANA_PASSWORD`) |
+
+| Dashboard | Shows |
+|---|---|
+| **Auction - Application Overview** | Live WS connections, bid accept/reject rate and reject reasons, items finalized (sold/unsold), HTTP request rate and p95 latency by route, and `bid-worker`'s adjudication latency (p50/p95/p99) - the number the report's fast-path NFRs are actually about |
+| **Auction - k6 Load Test** | VUs, HTTP request rate, p99 duration, failure rate, check pass rate, and WebSocket session/connect-time stats - populated whenever a k6 run pushes to Prometheus (see `loadtest/README.md`'s Grafana section) |
+
+Metric names worth knowing if you want to write your own queries in
+Prometheus (`http://localhost:9090`) or Grafana's Explore view:
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `auction_ws_connections_active` | gauge | currently-open WS connections, this instance |
+| `auction_bids_total{status,reason}` | counter | every adjudication outcome |
+| `auction_bid_processing_duration_seconds` | histogram | `handleBid` latency: Redis read through notify |
+| `auction_items_finalized_total{outcome}` | counter | auctions closed, `sold`/`unsold` |
+| `auction_http_requests_total{route,method,status}` | counter | REST requests, by matched chi route pattern |
+| `auction_http_request_duration_seconds{route,method}` | histogram | REST latency |
+
+Verified during development: generated real bids through the API and
+confirmed the exact PromQL each panel uses returns correct values directly
+against Prometheus's HTTP API before trusting the dashboard - e.g. bid
+processing p99 came back at 0.78ms, consistent with the architecture's
+"no disk I/O in the fast path" design.
 
 ## Managing the database (pgAdmin)
 

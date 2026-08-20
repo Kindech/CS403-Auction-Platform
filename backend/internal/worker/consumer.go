@@ -14,6 +14,7 @@ import (
 	"auction/backend/internal/db"
 	"auction/backend/internal/decision"
 	"auction/backend/internal/kafkabus"
+	"auction/backend/internal/metrics"
 	"auction/backend/internal/models"
 	"auction/backend/internal/redisstate"
 )
@@ -104,6 +105,9 @@ func (w *Worker) Run(ctx context.Context) {
 // off run in their own goroutines so a slow disk write can never add
 // latency to the real-time broadcast path.
 func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidInsert {
+	start := time.Now()
+	defer func() { metrics.BidProcessingDuration.Observe(time.Since(start).Seconds()) }()
+
 	state, ok, err := redisstate.Get(ctx, w.rdb, req.ItemID)
 	if err != nil {
 		log.Printf("worker: redis get failed for item %s: %v", req.ItemID, err)
@@ -171,6 +175,9 @@ func (w *Worker) logBidDecision(req models.BidRequest, accepted bool, reason str
 	if !accepted {
 		action = "bid.rejected"
 		details = fmt.Sprintf("amount=%.2f reason=%s", req.Amount, reason)
+		metrics.BidsTotal.WithLabelValues("rejected", reason).Inc()
+	} else {
+		metrics.BidsTotal.WithLabelValues("accepted", "").Inc()
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

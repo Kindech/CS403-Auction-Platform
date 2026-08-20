@@ -30,6 +30,7 @@ type Config struct {
 	BatchSize          int
 	BatchInterval      time.Duration
 	TickInterval       time.Duration
+	MetricsAddr        string // bid-worker's standalone /metrics server (api-server exposes it on HTTPAddr instead)
 }
 
 func getEnv(key, fallback string) string {
@@ -93,5 +94,6 @@ func Load() Config {
 		BatchSize:          getEnvInt("BATCH_SIZE", 50),
 		BatchInterval:      getEnvDuration("BATCH_INTERVAL", 500*time.Millisecond),
 		TickInterval:       getEnvDuration("TICK_INTERVAL", 1*time.Second),
+		MetricsAddr:        getEnv("METRICS_ADDR", ":9101"),
 	}
 }
