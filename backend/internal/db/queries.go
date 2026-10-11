@@ -169,6 +169,9 @@ func ListItemsBySeller(ctx context.Context, pool *pgxpool.Pool, sellerID string)
 }
 
 func GetItem(ctx context.Context, pool *pgxpool.Pool, id string) (models.Item, error) {
+	if !models.IsUUID(id) {
+		return models.Item{}, ErrNotFound
+	}
 	row := pool.QueryRow(ctx, `
 		SELECT `+itemSelectCols+`
 		FROM items i
@@ -255,24 +258,32 @@ func LogAudit(ctx context.Context, pool *pgxpool.Pool, userID, action, entityTyp
 // ---- bids ----
 
 type BidInsert struct {
-	ItemID string
-	UserID string
-	Amount float64
-	Status models.BidStatus
-	Reason string
-	At     time.Time
+	RequestID string
+	ItemID    string
+	UserID    string
+	Amount    float64
+	Status    models.BidStatus
+	Reason    string
+	At        time.Time
 }
 
 // BatchInsertBids writes a batch of bid audit records in one round trip.
+// Idempotent per RequestID: a bid Kafka re-delivers after it was already
+// written is skipped, so retrying or replaying a batch never duplicates rows.
 func BatchInsertBids(ctx context.Context, pool *pgxpool.Pool, bids []BidInsert) error {
 	if len(bids) == 0 {
 		return nil
 	}
 	batch := &pgx.Batch{}
 	for _, b := range bids {
+		var requestID *string
+		if b.RequestID != "" { // messages produced before request_id existed
+			requestID = &b.RequestID
+		}
 		batch.Queue(
-			`INSERT INTO bids (item_id, user_id, amount, status, reason, created_at) VALUES ($1,$2,$3,$4,$5,$6)`,
-			b.ItemID, b.UserID, b.Amount, b.Status, b.Reason, b.At,
+			`INSERT INTO bids (request_id, item_id, user_id, amount, status, reason, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)
+			 ON CONFLICT (request_id) DO NOTHING`,
+			requestID, b.ItemID, b.UserID, b.Amount, b.Status, b.Reason, b.At,
 		)
 	}
 	br := pool.SendBatch(ctx, batch)
@@ -286,6 +297,9 @@ func BatchInsertBids(ctx context.Context, pool *pgxpool.Pool, bids []BidInsert) 
 }
 
 func ListBidsForItem(ctx context.Context, pool *pgxpool.Pool, itemID string) ([]models.Bid, error) {
+	if !models.IsUUID(itemID) {
+		return nil, ErrNotFound
+	}
 	rows, err := pool.Query(ctx, `
 		SELECT b.id, b.item_id, b.user_id, u.display_name, b.amount, b.status, b.reason, b.created_at
 		FROM bids b JOIN users u ON u.id = b.user_id
@@ -304,6 +318,24 @@ func ListBidsForItem(ctx context.Context, pool *pgxpool.Pool, itemID string) ([]
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// GetLeadingBid returns the highest accepted bid recorded for an item, if
+// any. Used to rebuild an item's Redis state from Postgres when Redis lost
+// it, so the item resumes at its real price/leader instead of resetting to
+// the starting price and finalizing as "no bids".
+func GetLeadingBid(ctx context.Context, pool *pgxpool.Pool, itemID string) (bidderID, bidderName string, amount float64, ok bool, err error) {
+	err = pool.QueryRow(ctx, `
+		SELECT b.user_id, u.display_name, b.amount
+		FROM bids b JOIN users u ON u.id = b.user_id
+		WHERE b.item_id = $1 AND b.status = 'accepted'
+		ORDER BY b.amount DESC, b.created_at ASC
+		LIMIT 1`, itemID,
+	).Scan(&bidderID, &bidderName, &amount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", 0, false, nil
+	}
+	return bidderID, bidderName, amount, err == nil, err
 }
 
 func ListBidsForUser(ctx context.Context, pool *pgxpool.Pool, userID string) ([]models.Bid, error) {

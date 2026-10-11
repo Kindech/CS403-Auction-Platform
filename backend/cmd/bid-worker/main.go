@@ -14,6 +14,7 @@ import (
 	"auction/backend/internal/kafkabus"
 	"auction/backend/internal/redisstate"
 	"auction/backend/internal/worker"
+	"auction/backend/migrations"
 )
 
 func main() {
@@ -27,6 +28,10 @@ func main() {
 		log.Fatalf("connect postgres: %v", err)
 	}
 	defer pool.Close()
+
+	if err := db.Migrate(ctx, pool, migrations.FS); err != nil {
+		log.Fatalf("migrate postgres: %v", err)
+	}
 
 	rdb := redisstate.New(cfg.RedisAddr)
 	defer rdb.Close()

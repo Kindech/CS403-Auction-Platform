@@ -99,6 +99,10 @@ func (s *Server) handleMyItems(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleItemBids(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	bids, err := db.ListBidsForItem(r.Context(), s.pool, id)
+	if errors.Is(err, db.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "item not found")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list bids")
 		return

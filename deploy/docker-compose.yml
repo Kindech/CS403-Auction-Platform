@@ -13,8 +13,10 @@ services:
       POSTGRES_DB: auction
       POSTGRES_USER: auction
       POSTGRES_PASSWORD: auction
+    # Schema is applied by api-server/bid-worker on startup (db.Migrate),
+    # which - unlike docker-entrypoint-initdb.d - also upgrades an existing
+    # volume when a new migration file is added.
     volumes:
-      - ../backend/migrations:/docker-entrypoint-initdb.d
       - postgres-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
@@ -40,6 +42,12 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Live auction state (current price/leader) lives only here until the
+    # item ends, so persist every write (AOF) to a named volume - losing it
+    # used to make in-progress auctions finalize as "no bids".
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
     ports:
       - "6379:6379"
     healthcheck:
@@ -186,6 +194,7 @@ services:
 
 volumes:
   postgres-data:
+  redis-data:
   pgadmin-data:
   prometheus-data:
   grafana-data:

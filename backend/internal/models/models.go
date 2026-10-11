@@ -61,6 +61,9 @@ type Bid struct {
 
 // BidRequest is the raw message an api-server produces onto Kafka.
 type BidRequest struct {
+	// RequestID uniquely identifies this bid across Kafka re-deliveries, so
+	// replaying it can never write a second bids row.
+	RequestID string    `json:"request_id"`
 	ItemID    string    `json:"item_id"`
 	UserID    string    `json:"user_id"`
 	UserName  string    `json:"user_name"`

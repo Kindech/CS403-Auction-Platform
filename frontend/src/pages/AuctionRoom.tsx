@@ -13,6 +13,7 @@ const REJECT_MESSAGES: Record<string, string> = {
   auction_closed: "การประมูลนี้สิ้นสุดลงแล้ว",
   rate_limited: "คุณเสนอราคาถี่เกินไป กรุณารอสักครู่แล้วลองใหม่",
   not_authenticated: "กรุณาเข้าสู่ระบบก่อนเสนอราคา",
+  invalid_amount: "จำนวนเงินที่เสนอไม่ถูกต้อง กรุณาระบุจำนวนเงินที่มากกว่า 0 และไม่เกิน 999,999,999,999.99",
 };
 
 export function AuctionRoom() {

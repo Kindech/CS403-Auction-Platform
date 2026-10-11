@@ -124,7 +124,15 @@ func (d *Deps) readLoop(c *Client) {
 			continue
 		}
 
+		if !models.ValidBidAmount(in.Amount) {
+			d.Hub.SendToClient(c, Event{
+				Type: EventBidRejected, ItemID: c.ItemID, Reason: "invalid_amount",
+			})
+			continue
+		}
+
 		req := models.BidRequest{
+			RequestID: models.NewUUID(),
 			ItemID:    c.ItemID,
 			UserID:    c.UserID,
 			UserName:  c.displayName,

@@ -48,13 +48,25 @@ func (w *Worker) runLifecycle(ctx context.Context) {
 			continue
 		}
 		if !ok {
-			// Live in Postgres but no Redis state yet (e.g. seed data
-			// inserted directly as "live") - backfill it so bids work.
+			// Live in Postgres but no Redis state - either it never had any
+			// (seed data inserted directly as "live") or Redis lost it (e.g.
+			// restarted without persistence). Rebuild from the bids audit
+			// trail, not just the starting price: otherwise the item resets
+			// to its opening price and finalizes as "no bids" even though
+			// people bid on it.
 			state = models.AuctionState{
 				ItemID:       it.ID,
 				Price:        it.StartingPrice,
 				MinIncrement: it.BidIncrement,
 				EndTimeMs:    it.EndTime.UnixMilli(),
+			}
+			bidderID, bidderName, amount, found, err := db.GetLeadingBid(ctx, w.pool, it.ID)
+			if err != nil {
+				log.Printf("worker: look up leading bid for item %s: %v", it.ID, err)
+				continue // retry next tick rather than risk wiping out a real leader
+			}
+			if found {
+				state.Price, state.BidderID, state.BidderName = amount, bidderID, bidderName
 			}
 			if err := redisstate.Init(ctx, w.rdb, state); err != nil {
 				log.Printf("worker: backfill redis state for item %s: %v", it.ID, err)

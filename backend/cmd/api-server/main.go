@@ -12,6 +12,7 @@ import (
 	"auction/backend/internal/models"
 	"auction/backend/internal/redisstate"
 	"auction/backend/internal/ws"
+	"auction/backend/migrations"
 )
 
 func main() {
@@ -23,6 +24,10 @@ func main() {
 		log.Fatalf("connect postgres: %v", err)
 	}
 	defer pool.Close()
+
+	if err := db.Migrate(ctx, pool, migrations.FS); err != nil {
+		log.Fatalf("migrate postgres: %v", err)
+	}
 
 	rdb := redisstate.New(cfg.RedisAddr)
 	defer rdb.Close()

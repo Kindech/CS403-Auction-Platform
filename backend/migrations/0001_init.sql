@@ -1,7 +1,12 @@
 -- Real-time Auction Bidding System - initial schema
+--
+-- Every statement here is idempotent (IF NOT EXISTS / ON CONFLICT): databases
+-- created before the migration runner existed were initialized by Postgres's
+-- docker-entrypoint-initdb.d instead, so the runner re-applies this file once
+-- against them to start tracking it in schema_migrations.
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email         TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
@@ -9,9 +14,12 @@ CREATE TABLE users (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TYPE item_status AS ENUM ('upcoming', 'live', 'ended');
+DO $$ BEGIN
+    CREATE TYPE item_status AS ENUM ('upcoming', 'live', 'ended');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TABLE items (
+CREATE TABLE IF NOT EXISTS items (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     seller_id       UUID NOT NULL REFERENCES users(id),
     title           TEXT NOT NULL,
@@ -27,12 +35,15 @@ CREATE TABLE items (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_items_status ON items(status);
-CREATE INDEX idx_items_seller ON items(seller_id);
+CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
+CREATE INDEX IF NOT EXISTS idx_items_seller ON items(seller_id);
 
-CREATE TYPE bid_status AS ENUM ('accepted', 'rejected');
+DO $$ BEGIN
+    CREATE TYPE bid_status AS ENUM ('accepted', 'rejected');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TABLE bids (
+CREATE TABLE IF NOT EXISTS bids (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     item_id     UUID NOT NULL REFERENCES items(id),
     user_id     UUID NOT NULL REFERENCES users(id),
@@ -42,14 +53,15 @@ CREATE TABLE bids (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_bids_item ON bids(item_id, created_at);
-CREATE INDEX idx_bids_user ON bids(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bids_item ON bids(item_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_bids_user ON bids(user_id, created_at);
 
 -- Demo seed data: password for both demo users is "password123"
 -- bcrypt hash of "password123"
 INSERT INTO users (id, email, password_hash, display_name) VALUES
     ('11111111-1111-1111-1111-111111111111', 'seller@example.com', '$2a$10$RbOQXJ3s.kiv0PCb1sAPn.srJAoI7Z5Z8pwRkhjjLH39cib1cMak.', 'Demo Seller'),
-    ('22222222-2222-2222-2222-222222222222', 'bidder@example.com', '$2a$10$RbOQXJ3s.kiv0PCb1sAPn.srJAoI7Z5Z8pwRkhjjLH39cib1cMak.', 'Demo Bidder');
+    ('22222222-2222-2222-2222-222222222222', 'bidder@example.com', '$2a$10$RbOQXJ3s.kiv0PCb1sAPn.srJAoI7Z5Z8pwRkhjjLH39cib1cMak.', 'Demo Bidder')
+ON CONFLICT DO NOTHING;
 
 INSERT INTO items (id, seller_id, title, description, image_url, starting_price, bid_increment, start_time, end_time, status) VALUES
     ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111',
@@ -59,4 +71,5 @@ INSERT INTO items (id, seller_id, title, description, image_url, starting_price,
     ('44444444-4444-4444-4444-444444444444', '11111111-1111-1111-1111-111111111111',
      'Signed First-Edition Novel', 'First edition, signed by the author.',
      'https://images.unsplash.com/photo-1544947950-fa07a98d237f?w=800',
-     500, 25, now() + interval '2 minutes', now() + interval '15 minutes', 'upcoming');
+     500, 25, now() + interval '2 minutes', now() + interval '15 minutes', 'upcoming')
+ON CONFLICT DO NOTHING;

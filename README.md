@@ -204,15 +204,37 @@ chronological timeline across the whole account/auction lifecycle -
 and final price, or `"no bids"`). `bids` stays the per-item audit trail
 the report itself requires (§3.2.1); `audit_log` is the broader one.
 
-Migrations only auto-run against a brand-new Postgres volume
-(`docker-entrypoint-initdb.d` only fires on first init). If you're
-updating an existing stack rather than starting fresh, apply new
-migration files by hand instead of losing data with `docker compose down
--v`:
+### Migrations
 
-```bash
-docker compose exec -T postgres psql -U auction -d auction -f - < ../backend/migrations/0003_login_lockout.sql
-```
+`api-server` and `bid-worker` apply any pending `backend/migrations/*.sql`
+on startup (`db.Migrate`, files embedded into the binary), recording each
+in a `schema_migrations` table - so adding a migration file and running
+`docker compose up -d --build` upgrades an existing database in place, no
+`down -v` or manual `psql` needed. A Postgres advisory lock makes the three
+services take turns, so only one actually applies a given file. Because
+the schema is created by those services, a brand-new volume shows its
+tables in pgAdmin once `api-1` (or any of them) has started once.
+
+Rules for new migration files: name them `NNNN_description.sql` (applied
+in filename order), never edit one that has already shipped, and keep them
+idempotent (`IF NOT EXISTS`, `ON CONFLICT DO NOTHING`, or a `DO $$ ...
+EXCEPTION WHEN duplicate_object` block) - `0001`-`0003` predate the runner,
+so the first run against an older database re-applies them once to start
+tracking them.
+
+`0004_integrity.sql` adds the data-integrity guarantees the code relies on:
+
+| Change | Why |
+|---|---|
+| `bids.request_id` UUID + `UNIQUE` | Every bid gets an ID at produce time; `BatchInsertBids` does `ON CONFLICT (request_id) DO NOTHING`, so a Kafka re-delivery after a crash can never write a second row |
+| `CHECK`s on `items` (`starting_price > 0`, `bid_increment > 0`, `end_time > start_time`, winner ⇔ final price ⇔ ended) | Rows written outside the API (pgAdmin, scripts) can't break the worker's assumptions |
+| `CHECK (email = lower(email))` on `users` | `Bob@x.com` and `bob@x.com` can never become two accounts |
+| `idx_audit_log_entity` | "Everything that happened to item X" timeline lookups |
+
+Redis runs with AOF persistence on the `redis-data` volume. If live state
+is lost anyway, `bid-worker` rebuilds it from the highest accepted row in
+`bids`, so an in-progress auction keeps its real price and leader instead
+of resetting.
 
 ## Backend development
 

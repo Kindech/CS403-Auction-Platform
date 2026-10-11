@@ -83,14 +83,16 @@ func (w *Worker) Run(ctx context.Context) {
 			}
 			ins := w.handleBid(ctx, res.req)
 			buffer = append(buffer, pendingInsert{insert: ins, msg: res.msg})
-			if len(buffer) >= w.cfg.BatchSize {
-				w.flush(ctx, buffer)
+			if len(buffer) >= w.cfg.BatchSize && w.flush(ctx, buffer) {
 				buffer = nil
 			}
 
 		case <-flushTicker.C:
-			if len(buffer) > 0 {
-				w.flush(ctx, buffer)
+			// A failed flush keeps its buffer and retries here: dropping it
+			// would let the next successful commit move the Kafka offset past
+			// those bids, losing them for good. Retrying is safe because
+			// BatchInsertBids is idempotent per request_id.
+			if len(buffer) > 0 && w.flush(ctx, buffer) {
 				buffer = nil
 			}
 
@@ -108,25 +110,36 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 	start := time.Now()
 	defer func() { metrics.BidProcessingDuration.Observe(time.Since(start).Seconds()) }()
 
+	reject := func(reason string) db.BidInsert {
+		w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: reason})
+		w.logBidDecision(req, false, reason)
+		return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: reason, At: req.Timestamp}
+	}
+
+	// The api-server already filters these out; re-checked here because an
+	// out-of-range amount would otherwise be accepted into Redis and then
+	// fail the whole Postgres batch with a numeric overflow.
+	if !models.ValidBidAmount(req.Amount) {
+		ins := reject("invalid_amount")
+		ins.Amount = 0 // the raw value can't be stored; audit_log details keeps it
+		return ins
+	}
+
 	state, ok, err := redisstate.Get(ctx, w.rdb, req.ItemID)
 	if err != nil {
 		log.Printf("worker: redis get failed for item %s: %v", req.ItemID, err)
 		w.logBidDecision(req, false, "internal_error")
-		return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: "internal_error", At: req.Timestamp}
+		return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: "internal_error", At: req.Timestamp}
 	}
 	if !ok {
-		w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: "auction_not_live"})
-		w.logBidDecision(req, false, "auction_not_live")
-		return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: "auction_not_live", At: req.Timestamp}
+		return reject("auction_not_live")
 	}
 
 	out := decision.Decide(state, req.UserID, req.UserName, req.Amount, req.Timestamp.UnixMilli(),
 		w.cfg.AntiSnipeWindow.Milliseconds(), w.cfg.AntiSnipeExtension.Milliseconds())
 
 	if !out.Accepted {
-		w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: out.Reason})
-		w.logBidDecision(req, false, out.Reason)
-		return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: out.Reason, At: req.Timestamp}
+		return reject(out.Reason)
 	}
 
 	if err := redisstate.Set(ctx, w.rdb, out.NewState); err != nil {
@@ -162,7 +175,7 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 		}()
 	}
 
-	return db.BidInsert{ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidAccepted, At: req.Timestamp}
+	return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidAccepted, At: req.Timestamp}
 }
 
 // logBidDecision records the bid-adjudication outcome in audit_log - a
@@ -190,10 +203,11 @@ func (w *Worker) logBidDecision(req models.BidRequest, accepted bool, reason str
 
 // flush durably writes the audit batch to Postgres and only then commits
 // Kafka offsets - the invariant that makes worker crashes lossless (report
-// section 2.6.4: "at-least-once processing via offset commit").
-func (w *Worker) flush(ctx context.Context, buffer []pendingInsert) {
+// section 2.6.4: "at-least-once processing via offset commit"). Returns
+// whether the batch was written; on false the caller keeps it to retry.
+func (w *Worker) flush(ctx context.Context, buffer []pendingInsert) bool {
 	if len(buffer) == 0 {
-		return
+		return true
 	}
 	inserts := make([]db.BidInsert, len(buffer))
 	msgs := make([]kafka.Message, len(buffer))
@@ -205,10 +219,13 @@ func (w *Worker) flush(ctx context.Context, buffer []pendingInsert) {
 	writeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.BatchInsertBids(writeCtx, w.pool, inserts); err != nil {
-		log.Printf("worker: batch insert failed, offsets NOT committed (will replay): %v", err)
-		return
+		log.Printf("worker: batch insert of %d bids failed, offsets NOT committed (will retry): %v", len(inserts), err)
+		return false
 	}
 	if err := w.consumer.CommitOffset(writeCtx, msgs...); err != nil {
+		// Rows are durable; an uncommitted offset only means a replay, which
+		// the request_id conflict check turns into a no-op.
 		log.Printf("worker: commit offsets failed: %v", err)
 	}
+	return true
 }
