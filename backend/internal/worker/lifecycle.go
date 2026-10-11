@@ -17,10 +17,34 @@ import (
 // this from the same goroutine that adjudicates bids means an item can
 // never be "finalized" out from under a bid that's concurrently updating
 // its Redis state - there is no concurrency between the two to race.
+//
+// It shares the adjudication goroutine, so every Postgres call is bounded
+// by lifecycleDBTimeout, and after a failure the next ticks are skipped with
+// exponential backoff - otherwise a down database would stall bidding for
+// the full timeout on every tick.
 func (w *Worker) runLifecycle(ctx context.Context) {
+	if time.Now().Before(w.lifecycleNextAt) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, lifecycleDBTimeout)
+	defer cancel()
+	if w.lifecycleTick(ctx) {
+		w.lifecycleBackoff = 0
+		return
+	}
+	w.lifecycleBackoff = min(max(w.lifecycleBackoff*2, time.Second), 30*time.Second)
+	w.lifecycleNextAt = time.Now().Add(w.lifecycleBackoff)
+	log.Printf("worker: lifecycle tick failed, next attempt in %s", w.lifecycleBackoff)
+}
+
+const lifecycleDBTimeout = 2 * time.Second
+
+// lifecycleTick does one activate/finalize pass; false means Postgres failed.
+func (w *Worker) lifecycleTick(ctx context.Context) bool {
 	activated, err := db.ActivateDueItems(ctx, w.pool)
 	if err != nil {
 		log.Printf("worker: activate due items: %v", err)
+		return false
 	}
 	for _, it := range activated {
 		exists, _ := redisstate.Exists(ctx, w.rdb, it.ID)
@@ -39,7 +63,7 @@ func (w *Worker) runLifecycle(ctx context.Context) {
 	liveItems, err := db.ListLiveItems(ctx, w.pool)
 	if err != nil {
 		log.Printf("worker: list live items: %v", err)
-		return
+		return false
 	}
 	nowMs := time.Now().UnixMilli()
 	for _, it := range liveItems {
@@ -79,6 +103,7 @@ func (w *Worker) runLifecycle(ctx context.Context) {
 		}
 		w.finalizeItem(ctx, it.ID, state)
 	}
+	return true
 }
 
 func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.AuctionState) {

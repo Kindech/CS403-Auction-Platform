@@ -25,6 +25,11 @@ type Worker struct {
 	rdb      *redis.Client
 	consumer *kafkabus.Consumer
 	notifier *Notifier
+
+	// While Postgres is failing, lifecycle ticks back off so their timeouts
+	// can't keep stalling the adjudication loop they share.
+	lifecycleBackoff time.Duration
+	lifecycleNextAt  time.Time
 }
 
 func New(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, consumer *kafkabus.Consumer, notifier *Notifier) *Worker {
@@ -40,27 +45,30 @@ type fetchResult struct {
 type pendingInsert struct {
 	insert db.BidInsert
 	msg    kafka.Message
+	skip   bool // undecodable message: nothing to insert, but its offset still gets committed
 }
+
+// writeQueueBatches bounds how many batches can wait on Postgres (~50 bids
+// each) before adjudication applies backpressure.
+const writeQueueBatches = 1024
 
 // Run is the single sequential adjudication loop. Deliberately
 // single-goroutine: it is what makes read-decide-write on an item's Redis
 // state race-free without any locking, and it's what makes the lifecycle
 // ticker (activate/finalize items) safe to interleave with bid processing
 // for the same item.
+//
+// Postgres is kept off this loop: batches go to writeLoop, so a slow or
+// down database delays the audit trail, never bid adjudication.
 func (w *Worker) Run(ctx context.Context) {
 	msgCh := make(chan fetchResult, 64)
+	go w.fetchLoop(ctx, msgCh)
+
+	writeCh := make(chan []pendingInsert, writeQueueBatches)
+	writerDone := make(chan struct{})
 	go func() {
-		for {
-			req, msg, err := w.consumer.ReadBid(ctx)
-			select {
-			case msgCh <- fetchResult{req, msg, err}:
-			case <-ctx.Done():
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
+		defer close(writerDone)
+		w.writeLoop(ctx, writeCh)
 	}()
 
 	flushTicker := time.NewTicker(w.cfg.BatchInterval)
@@ -69,35 +77,98 @@ func (w *Worker) Run(ctx context.Context) {
 	defer lifecycleTicker.Stop()
 
 	var buffer []pendingInsert
+	enqueue := func() {
+		if len(buffer) == 0 {
+			return
+		}
+		select {
+		case writeCh <- buffer:
+		default:
+			log.Printf("worker: write queue full (%d batches waiting on Postgres) - pausing adjudication until it drains", writeQueueBatches)
+			writeCh <- buffer
+		}
+		buffer = nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			w.flush(ctx, buffer)
+			enqueue()
+			close(writeCh)
+			<-writerDone
 			return
 
 		case res := <-msgCh:
 			if res.err != nil {
-				log.Printf("worker: fetch error: %v", res.err)
-				continue
+				log.Printf("worker: skipping undecodable message at %s/%d@%d: %v", res.msg.Topic, res.msg.Partition, res.msg.Offset, res.err)
+				buffer = append(buffer, pendingInsert{msg: res.msg, skip: true})
+			} else {
+				ins := w.handleBid(ctx, res.req)
+				buffer = append(buffer, pendingInsert{insert: ins, msg: res.msg})
 			}
-			ins := w.handleBid(ctx, res.req)
-			buffer = append(buffer, pendingInsert{insert: ins, msg: res.msg})
-			if len(buffer) >= w.cfg.BatchSize && w.flush(ctx, buffer) {
-				buffer = nil
+			if len(buffer) >= w.cfg.BatchSize {
+				enqueue()
 			}
 
 		case <-flushTicker.C:
-			// A failed flush keeps its buffer and retries here: dropping it
-			// would let the next successful commit move the Kafka offset past
-			// those bids, losing them for good. Retrying is safe because
-			// BatchInsertBids is idempotent per request_id.
-			if len(buffer) > 0 && w.flush(ctx, buffer) {
-				buffer = nil
-			}
+			enqueue()
 
 		case <-lifecycleTicker.C:
 			w.runLifecycle(ctx)
+		}
+	}
+}
+
+// fetchLoop feeds msgCh until ctx is cancelled. A broker error (Kafka
+// restarting, network blip) is retried with backoff - it used to end this
+// goroutine, after which the worker looked healthy but never processed
+// another bid. Decode errors are passed on so the bad message gets skipped.
+func (w *Worker) fetchLoop(ctx context.Context, msgCh chan<- fetchResult) {
+	backoff := 500 * time.Millisecond
+	for {
+		req, msg, err := w.consumer.ReadBid(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil && msg.Topic == "" { // nothing fetched: broker-side error
+			log.Printf("worker: kafka fetch error (retrying in %s): %v", backoff, err)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+			backoff = min(backoff*2, 10*time.Second)
+			continue
+		}
+		backoff = 500 * time.Millisecond
+		select {
+		case msgCh <- fetchResult{req, msg, err}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// writeLoop durably writes batches in arrival order, retrying each until it
+// succeeds, then commits its offsets. Order matters: a Kafka commit covers
+// everything before it in the partition, so batch N+1 must never be
+// committed while batch N is unwritten. On shutdown, queued batches are
+// still written while Postgres is reachable; after the first failure the
+// rest are left uncommitted and replayed by the next worker (inserts are
+// idempotent per request_id).
+func (w *Worker) writeLoop(ctx context.Context, writeCh <-chan []pendingInsert) {
+	for batch := range writeCh {
+		backoff := 500 * time.Millisecond
+		for !w.flush(batch) {
+			select {
+			case <-time.After(backoff):
+				backoff = min(backoff*2, 10*time.Second)
+			case <-ctx.Done():
+				log.Printf("worker: shutting down with unwritten bids - leaving their offsets uncommitted for replay")
+				for range writeCh { // drain so Run's close/wait can finish
+				}
+				return
+			}
 		}
 	}
 }
@@ -204,15 +275,17 @@ func (w *Worker) logBidDecision(req models.BidRequest, accepted bool, reason str
 // flush durably writes the audit batch to Postgres and only then commits
 // Kafka offsets - the invariant that makes worker crashes lossless (report
 // section 2.6.4: "at-least-once processing via offset commit"). Returns
-// whether the batch was written; on false the caller keeps it to retry.
-func (w *Worker) flush(ctx context.Context, buffer []pendingInsert) bool {
+// whether the batch was written; on false the caller retries it.
+func (w *Worker) flush(buffer []pendingInsert) bool {
 	if len(buffer) == 0 {
 		return true
 	}
-	inserts := make([]db.BidInsert, len(buffer))
+	inserts := make([]db.BidInsert, 0, len(buffer))
 	msgs := make([]kafka.Message, len(buffer))
 	for i, p := range buffer {
-		inserts[i] = p.insert
+		if !p.skip {
+			inserts = append(inserts, p.insert)
+		}
 		msgs[i] = p.msg
 	}
 
