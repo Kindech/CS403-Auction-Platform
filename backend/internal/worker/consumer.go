@@ -196,6 +196,18 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 		return ins
 	}
 
+	// A replay (worker crashed after applying this bid but before its batch
+	// reached Postgres) must be recorded as the acceptance it was. Running it
+	// through Decide again would compare it against a price that already
+	// includes it and log it as "bid_too_low". Nothing else to do: state,
+	// broadcast and audit_log entry all happened the first time.
+	if applied, err := redisstate.WasApplied(ctx, w.rdb, req.ItemID, req.RequestID); err != nil {
+		log.Printf("worker: redis applied-check failed for item %s: %v", req.ItemID, err)
+	} else if applied {
+		log.Printf("worker: replayed bid %s already applied to item %s - recording as accepted", req.RequestID, req.ItemID)
+		return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidAccepted, At: req.Timestamp}
+	}
+
 	state, ok, err := redisstate.Get(ctx, w.rdb, req.ItemID)
 	if err != nil {
 		log.Printf("worker: redis get failed for item %s: %v", req.ItemID, err)
@@ -213,7 +225,7 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 		return reject(out.Reason)
 	}
 
-	if err := redisstate.Set(ctx, w.rdb, out.NewState); err != nil {
+	if err := redisstate.SetAccepted(ctx, w.rdb, out.NewState, req.RequestID); err != nil {
 		log.Printf("worker: redis set failed for item %s: %v", req.ItemID, err)
 	}
 
