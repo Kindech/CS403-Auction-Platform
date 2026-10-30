@@ -38,6 +38,18 @@ bash chaos/tc06_worker_crash_replay.sh
 
 Or run everything with `./run_all.sh` (stops at the first failure).
 
+### Resilience demo (for presenting)
+
+`demo_resilience.ps1` walks through the fault-tolerance guarantees with
+readable, colored output - auto-applied migrations, TC-06 plus the resulting
+`bids` rows (all `accepted`, all with a `request_id`), and nginx failover with
+api-1 stopped - then deletes the TC-06 item it created. Run it in its own
+console window from the repo root (takes ~1 minute):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File loadtest\demo_resilience.ps1
+```
+
 Every k6 script creates its own throwaway item (and, where needed, throwaway
 users) via the REST API in its `setup()` function, so they're safe to run
 repeatedly against a live stack without interfering with each other or with
