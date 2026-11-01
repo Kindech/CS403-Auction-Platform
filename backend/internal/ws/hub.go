@@ -20,9 +20,9 @@ type Client struct {
 }
 
 // Hub fans WS traffic out to every client subscribed to an item's room.
-// One Hub instance per api-server process; bid-worker calls every
-// api-server's /internal/events so each Hub only needs to know about its
-// own locally-connected clients.
+// One Hub instance per api-server process; every api-server receives all of
+// bid-worker's events over Redis Pub/Sub (see RelayEvents) so each Hub only
+// needs to know about its own locally-connected clients.
 type Hub struct {
 	mu    sync.RWMutex
 	rooms map[string]map[*Client]bool // itemID -> clients
@@ -138,7 +138,7 @@ func (h *Hub) SendToUser(itemID, userID string, ev Event) {
 
 // SendTo delivers an event either to the whole room or to one user,
 // depending on whether TargetUserID is set - this is the shape bid-worker
-// posts to /internal/events.
+// publishes on the event channel.
 func (h *Hub) SendTo(ev Event) {
 	if ev.TargetUserID != "" {
 		h.SendToUser(ev.ItemID, ev.TargetUserID, ev)

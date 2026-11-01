@@ -4,7 +4,6 @@ x-backend-env: &backend-env
   KAFKA_BROKERS: kafka:9092
   KAFKA_TOPIC: bid-requests
   JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
-  INTERNAL_SECRET: ${INTERNAL_SECRET:-dev-internal-secret-change-me}
 
 services:
   postgres:
@@ -132,7 +131,6 @@ services:
     environment:
       <<: *backend-env
       KAFKA_GROUP_ID: bid-worker
-      PEER_INTERNAL_URLS: "http://api-1:8080,http://api-2:8080"
       ANTI_SNIPE_WINDOW: "60s"
       ANTI_SNIPE_EXTENSION: "60s"
       BATCH_SIZE: "50"

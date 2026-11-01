@@ -11,6 +11,7 @@ import (
 
 	"auction/backend/internal/config"
 	"auction/backend/internal/db"
+	"auction/backend/internal/eventbus"
 	"auction/backend/internal/kafkabus"
 	"auction/backend/internal/redisstate"
 	"auction/backend/internal/worker"
@@ -39,10 +40,7 @@ func main() {
 	consumer := kafkabus.NewConsumer(cfg.KafkaBrokers, cfg.KafkaTopic, cfg.KafkaGroupID)
 	defer consumer.Close()
 
-	if len(cfg.PeerInternalURLs) == 0 {
-		log.Println("worker: WARNING no PEER_INTERNAL_URLS configured - bids will be adjudicated but never broadcast")
-	}
-	notifier := worker.NewNotifier(cfg.PeerInternalURLs, cfg.InternalSecret)
+	notifier := worker.NewNotifier(rdb)
 
 	go func() {
 		mux := http.NewServeMux()
@@ -55,8 +53,8 @@ func main() {
 	}()
 
 	w := worker.New(cfg, pool, rdb, consumer, notifier)
-	log.Printf("bid-worker started (group=%s topic=%s anti-snipe=%s/+%s peers=%v)",
-		cfg.KafkaGroupID, cfg.KafkaTopic, cfg.AntiSnipeWindow, cfg.AntiSnipeExtension, cfg.PeerInternalURLs)
+	log.Printf("bid-worker started (group=%s topic=%s anti-snipe=%s/+%s events=redis:%s)",
+		cfg.KafkaGroupID, cfg.KafkaTopic, cfg.AntiSnipeWindow, cfg.AntiSnipeExtension, eventbus.Channel)
 	w.Run(ctx)
 	log.Println("bid-worker shut down")
 }

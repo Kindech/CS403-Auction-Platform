@@ -36,12 +36,13 @@ func main() {
 	defer producer.Close()
 
 	hub := ws.NewHub()
+	go hub.RelayEvents(ctx, rdb)
+
 	wsDeps := &ws.Deps{
-		Hub:            hub,
-		JWTSecret:      cfg.JWTSecret,
-		InternalSecret: cfg.InternalSecret,
-		Redis:          rdb,
-		Producer:       producer,
+		Hub:       hub,
+		JWTSecret: cfg.JWTSecret,
+		Redis:     rdb,
+		Producer:  producer,
 		GetItem: func(ctx context.Context, itemID string) (models.Item, error) {
 			return db.GetItem(ctx, pool, itemID)
 		},

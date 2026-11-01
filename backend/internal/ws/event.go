@@ -1,9 +1,9 @@
 package ws
 
-// Event is the single wire-format used both for bid-worker -> api-server
-// "/internal/events" notifications and for api-server -> browser WS pushes.
-// One shape for both keeps the fan-out path trivial: a server that receives
-// an Event from the worker forwards it (almost) verbatim to the room.
+// Event is the api-server -> browser WS wire format. It mirrors
+// eventbus.Message (bid-worker -> api-server) field for field, which keeps
+// the fan-out path trivial: a server that receives a message from the worker
+// forwards it (almost) verbatim to the room.
 type Event struct {
 	Type string `json:"type"` // sync | price_update | bid_rejected | auction_ended
 

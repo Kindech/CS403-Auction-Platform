@@ -22,7 +22,6 @@ import (
 type Deps struct {
 	Hub             *Hub
 	JWTSecret       string
-	InternalSecret  string
 	Redis           *redis.Client
 	Producer        *kafkabus.Producer
 	GetItem         func(ctx context.Context, itemID string) (models.Item, error)

@@ -28,7 +28,8 @@ decoupled, event-sequenced auction platform designed to survive last-second
                     │  bid-worker  │  Go: single sequential consumer loop
                     │              │  → read/compare/write item state in Redis
                     │              │  → anti-snipe (soft-close) extension
-                    │              │  → direct HTTP notify to every api-* instance
+                    │              │  → PUBLISH outcome on Redis Pub/Sub; every
+                    │              │    api-* instance SUBSCRIBEs and relays it
                     │              │  → async batched INSERT into Postgres
                     │              │  → commits the Kafka offset only after that
                     │              │    insert succeeds (at-least-once, replayable)
@@ -52,6 +53,18 @@ distributed lock is needed (report §3.3.2).
 committed *after* its audit record is durably written to Postgres. If
 `bid-worker` dies mid-batch, those messages are simply re-delivered to
 whichever instance replaces it (report §2.6.4). See `loadtest/chaos/tc06_worker_crash_replay.sh`.
+
+**Why outcomes go out over Redis Pub/Sub**: each browser's WebSocket stays
+on whichever api-server nginx picked, so every accepted bid has to reach
+*every* api-server. `bid-worker` publishes each outcome once on the
+`auction:events` channel (`internal/eventbus`) and each api-server
+subscribes on startup (`Hub.RelayEvents`), so an instance added by scaling
+out receives events without any config change - the earlier design POSTed
+to a fixed `PEER_INTERNAL_URLS` list, which new instances were never on.
+Delivery is at-most-once, which is fine because events carry absolute
+state (the next one corrects a missed one) and a reconnecting client gets a
+fresh `sync`; the bid decisions themselves stay durable in
+Kafka/Redis/Postgres.
 
 **Anyone can watch, only accounts can bid**: report §3.2.1 only requires an
 account to place a bid, not to see prices update live. The WS handshake
@@ -256,8 +269,7 @@ list and defaults, and `deploy/docker-compose.yml` for how they're wired):
 | Var | Meaning |
 |---|---|
 | `POSTGRES_URL`, `REDIS_ADDR`, `KAFKA_BROKERS` | service endpoints |
-| `JWT_SECRET`, `INTERNAL_SECRET` | must match across every `api-*` and `bid-worker` instance |
-| `PEER_INTERNAL_URLS` | (bid-worker only) every `api-*` instance's internal base URL, for direct broadcast |
+| `JWT_SECRET` | must match across every `api-*` instance |
 | `BID_RATE_LIMIT_PER_SEC` | per-WS-connection bid throttle (report NFR: 10/s) |
 | `ANTI_SNIPE_WINDOW` / `ANTI_SNIPE_EXTENSION` | soft-close window and extension length |
 
@@ -350,5 +362,5 @@ Per the confirmed implementation scope, this is a Docker Compose deployment,
 not a live Kubernetes cluster - `api-1`/`api-2` stand in for what would be an
 HPA-scaled Deployment, and nginx's static upstream list stands in for what
 would be a K8s Service/Ingress. The architecture (stateless API servers,
-single-sequential-consumer worker, direct broadcast, offset-commit-after-write)
+single-sequential-consumer worker, Pub/Sub broadcast, offset-commit-after-write)
 is identical either way; only the elasticity mechanism differs.

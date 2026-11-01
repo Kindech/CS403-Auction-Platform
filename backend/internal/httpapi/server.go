@@ -48,7 +48,5 @@ func (s *Server) Router() http.Handler {
 		s.wsDeps.ServeWS(chi.URLParam(r, "id"))(w, r)
 	})
 
-	r.Post("/internal/events", s.wsDeps.ServeInternalEvents)
-
 	return r
 }
