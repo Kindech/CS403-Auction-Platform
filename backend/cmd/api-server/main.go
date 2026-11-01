@@ -19,7 +19,7 @@ func main() {
 	cfg := config.Load()
 	ctx := context.Background()
 
-	pool, err := db.Connect(ctx, cfg.PostgresURL)
+	pool, err := db.Connect(ctx, cfg.PostgresURL, cfg.PostgresMaxConns)
 	if err != nil {
 		log.Fatalf("connect postgres: %v", err)
 	}

@@ -24,7 +24,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := db.Connect(ctx, cfg.PostgresURL)
+	pool, err := db.Connect(ctx, cfg.PostgresURL, cfg.PostgresMaxConns)
 	if err != nil {
 		log.Fatalf("connect postgres: %v", err)
 	}

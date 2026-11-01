@@ -7,12 +7,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
+// Connect opens a pool of at most maxConns connections. Every running
+// api-server and bid-worker holds its own pool, so the sum over all of them
+// - including every pod an autoscaler may add - has to stay under
+// Postgres's max_connections (100 by default), or the extra connection
+// attempts fail with "too many clients" and requests return 500.
+func Connect(ctx context.Context, url string, maxConns int) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, err
 	}
-	cfg.MaxConns = 20
+	cfg.MaxConns = int32(maxConns)
 	cfg.MaxConnLifetime = time.Hour
 
 	var pool *pgxpool.Pool

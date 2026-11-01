@@ -9,8 +9,9 @@ import (
 
 type Config struct {
 	// shared
-	PostgresURL    string
-	RedisAddr      string
+	PostgresURL      string
+	PostgresMaxConns int // this process's pool size - see db.Connect
+	RedisAddr        string
 	KafkaBrokers   []string
 	KafkaTopic     string
 	JWTSecret      string
@@ -72,7 +73,8 @@ func splitList(v string) []string {
 
 func Load() Config {
 	return Config{
-		PostgresURL:    getEnv("POSTGRES_URL", "postgres://auction:auction@localhost:5432/auction?sslmode=disable"),
+		PostgresURL:      getEnv("POSTGRES_URL", "postgres://auction:auction@localhost:5432/auction?sslmode=disable"),
+		PostgresMaxConns: getEnvInt("POSTGRES_MAX_CONNS", 20),
 		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
 		KafkaBrokers:   splitList(getEnv("KAFKA_BROKERS", "localhost:9092")),
 		KafkaTopic:     getEnv("KAFKA_TOPIC", "bid-requests"),
