@@ -320,9 +320,20 @@ npm run dev   # proxy /api และ /ws ไปที่ http://localhost:8080 �
 
 ## ทดสอบ Load & ความถูกต้อง
 
-`loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 3 test เพื่อพิสูจน์สิ่งที่รายงาน
-กล่าวไว้ในส่วนอื่นแต่ตารางไม่มี scenario (soft-close extension, worker crash/replay, reconnect
-resync) รายละเอียดแต่ละตัวและวิธีอ่านผลอยู่ใน `loadtest/README.md`
+`loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 5 test เพื่อพิสูจน์สิ่งที่รายงาน
+กล่าวไว้ในส่วนอื่นแต่ตารางไม่มี scenario (TC-05 soft-close extension, TC-06 worker crash/replay,
+TC-07 reconnect resync, TC-08 scale-out fan-out, TC-09 api-server failover) รายละเอียดแต่ละตัว
+และวิธีอ่านผลอยู่ใน `loadtest/README.md`
+
+ทดสอบการ scale และ failover ของ api-server ได้เองด้วยคำสั่งเดียว (Node.js 22+, เปิด stack ไว้แล้ว):
+
+```bash
+cd loadtest
+node chaos/tc08_scaleout_fanout.mjs   # เพิ่ม api-3 ที่ไม่มีใครรู้จัก แล้วตรวจว่า viewer ทุก instance ได้ราคาครบ
+node chaos/tc09_api_failover.mjs      # kill api-1 กลางการประมูล แล้วตรวจว่าทุกคนต่อใหม่ได้ราคาล่าสุด
+```
+
+ทั้งสองตัวพิมพ์ `PASS`/`FAIL` ทีละข้อ และลบ container กับข้อมูลทดสอบที่สร้างทิ้งเองตอนจบ
 
 ```bash
 cd loadtest

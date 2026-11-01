@@ -23,4 +23,10 @@ k6 run k6/tc07_reconnect_resync.js
 echo "### TC-06 Worker Crash + Replay"
 bash chaos/tc06_worker_crash_replay.sh
 
+echo "### TC-08 Scale-out Fan-out"
+node chaos/tc08_scaleout_fanout.mjs
+
+echo "### TC-09 API Server Failover"
+node chaos/tc09_api_failover.mjs
+
 echo "All load/chaos tests passed."
