@@ -78,6 +78,7 @@ backend/            Go module: cmd/api-server, cmd/bid-worker, internal/*
   migrations/        Postgres schema + ข้อมูล demo
 frontend/            React + Vite + TypeScript + Tailwind SPA
 deploy/              docker-compose.yml, Dockerfiles, nginx.conf
+k8s/                 Kubernetes manifests (kustomize) + HPA, run-k6.ps1
 loadtest/            k6 + chaos scripts ตาม test plan ในรายงาน
 .github/workflows/   CI: go vet/build/test + frontend build ทุกครั้งที่ push
 ```
@@ -292,6 +293,7 @@ Environment variables หลัก (ดู `internal/config/config.go` สำห
 | Var | ความหมาย |
 |---|---|
 | `POSTGRES_URL`, `REDIS_ADDR`, `KAFKA_BROKERS` | ที่อยู่ของ service |
+| `POSTGRES_MAX_CONNS` | ขนาด connection pool ต่อ process (ค่าเริ่มต้น 20) — ผลรวมทุก instance ต้องไม่เกิน `max_connections` ของ Postgres |
 | `JWT_SECRET` | ต้องตรงกันทุก `api-*` instance |
 | `BID_RATE_LIMIT_PER_SEC` | จำกัดจำนวนบิดต่อ WS connection (NFR ในรายงาน: 10/วินาที) |
 | `ANTI_SNIPE_WINDOW` / `ANTI_SNIPE_EXTENSION` | ช่วงเวลา soft-close และเวลาที่ต่อให้ |
@@ -384,10 +386,24 @@ port-forwarding ของ Docker Desktop สะสม connection state ที่
 `internal/models` และ frontend build ถูกออกแบบให้ตรวจ ดูประวัติการรันได้ที่แท็บ **Actions** บน
 GitHub ส่วน badge ด้านบนไฟล์นี้แสดงผลรอบล่าสุดของ branch ที่ GitHub เลือกเป็นค่าเริ่มต้น
 
-## สิ่งที่ตั้งใจไม่ทำ (ตอนนี้)
+## Kubernetes (local)
 
-ตาม scope ที่ตกลงไว้ ตอนนี้เป็นการ deploy ด้วย Docker Compose ไม่ใช่ Kubernetes cluster จริง —
-`api-1`/`api-2` เป็นตัวแทนของ Deployment ที่ HPA จะ scale และรายชื่อ upstream แบบคงที่ของ nginx
-เป็นตัวแทนของ K8s Service/Ingress สถาปัตยกรรม (API server แบบ stateless, worker แบบ single
-sequential consumer, broadcast ผ่าน Pub/Sub, commit offset หลังเขียนสำเร็จ) เหมือนกันทุกอย่าง
-ต่างแค่กลไกการ scale
+นอกจาก compose ระบบเดียวกันรันบน Kubernetes ของ Docker Desktop ได้ด้วย (`k8s/`) โดย api-server เป็น
+Deployment ที่ **HorizontalPodAutoscaler เพิ่ม/ลด pod เองตาม CPU (2–6 pod)** แทน api-1/api-2 ที่ตายตัว
+และ pod ที่ตายจะถูกสร้างใหม่เอง สถาปัตยกรรมอื่นเหมือนเดิมทุกอย่าง (API server แบบ stateless, worker
+แบบ single sequential consumer, broadcast ผ่าน Redis Pub/Sub, commit offset หลังเขียนสำเร็จ)
+
+```bash
+kubectl apply -k k8s
+```
+
+วิธีติดตั้ง (build image, metrics-server) วิธีดู HPA scale สด, self-healing, การรัน TC-08/TC-09
+บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
+
+ผลสำคัญ: ยิงโหลด 300 VU ต่อเนื่อง HPA เพิ่ม api-server จาก 2 → 6 pod แล้วลดกลับเมื่อโหลดหยุด
+และการ scale จริงเจอปัญหาที่ compose ไม่เคยเจอ — connection pool ของ 6 pod รวมกันเกิน
+`max_connections` ของ Postgres ทำให้ request 0.22% ได้ 500 แก้แล้วด้วย `POSTGRES_MAX_CONNS`
+(รายละเอียดใน `k8s/README.md`)
+
+`POSTGRES_MAX_CONNS` (ค่าเริ่มต้น 20) คือขนาด connection pool ของแต่ละ process — ผลรวมของทุก
+api-server และ bid-worker ที่รันพร้อมกันต้องไม่เกิน `max_connections` ของ Postgres (100)

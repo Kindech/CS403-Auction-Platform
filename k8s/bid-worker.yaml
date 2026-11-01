@@ -1,0 +1,63 @@
+# bid-worker: exactly one pod, never scaled - its single sequential loop is
+# what makes bid adjudication race-free without locks (report section
+# 3.3.2). If the pod dies, Kubernetes starts a replacement and Kafka
+# re-delivers every bid whose offset wasn't committed yet (loadtest TC-06).
+apiVersion: v1
+kind: Service
+metadata:
+  name: bid-worker
+spec:
+  selector:
+    app: bid-worker
+  ports:
+    - name: metrics
+      port: 9101
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bid-worker
+spec:
+  replicas: 1
+  # Recreate, not RollingUpdate: an update must never run the old and new
+  # worker side by side.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: bid-worker
+  template:
+    metadata:
+      labels:
+        app: bid-worker
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        - name: wait-for-deps
+          image: busybox:1.36
+          command: ["sh", "-c", "for s in postgres:5432 redis:6379 kafka:9092; do until nc -z ${s%:*} ${s#*:}; do echo waiting for $s; sleep 2; done; done"]
+      containers:
+        - name: bid-worker
+          image: auction-worker:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: backend-env
+          env:
+            - name: POSTGRES_URL
+              valueFrom: { secretKeyRef: { name: backend-secrets, key: POSTGRES_URL } }
+            - { name: KAFKA_GROUP_ID, value: bid-worker }
+            - { name: ANTI_SNIPE_WINDOW, value: "60s" }
+            - { name: ANTI_SNIPE_EXTENSION, value: "60s" }
+            - { name: BATCH_SIZE, value: "50" }
+            - { name: BATCH_INTERVAL, value: "500ms" }
+            - { name: TICK_INTERVAL, value: "1s" }
+          ports:
+            - containerPort: 9101
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9101 }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: "1", memory: 256Mi }

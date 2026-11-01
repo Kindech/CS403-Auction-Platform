@@ -1,0 +1,23 @@
+# Settings shared by api-server and bid-worker - the same values as the
+# x-backend-env block in deploy/docker-compose.yml, with service names
+# resolving through cluster DNS instead of compose's network.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-env
+data:
+  REDIS_ADDR: redis:6379
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_TOPIC: bid-requests
+---
+# Dev values, same as compose's defaults. Replace both before running this
+# anywhere reachable from outside your machine.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backend-secrets
+type: Opaque
+stringData:
+  JWT_SECRET: dev-secret-change-me
+  POSTGRES_URL: postgres://auction:auction@postgres:5432/auction?sslmode=disable
+  POSTGRES_PASSWORD: auction

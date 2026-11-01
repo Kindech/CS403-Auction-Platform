@@ -1,0 +1,103 @@
+# api-server: stateless, so it runs as one Deployment that the HPA below
+# scales between 2 and 6 pods - the elastic version of compose's fixed
+# api-1/api-2. Every pod subscribes to bid-worker's Redis Pub/Sub channel
+# on startup, so a pod the HPA adds gets live events with no config change
+# (loadtest TC-08 checks exactly this).
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-server
+spec:
+  selector:
+    app: api-server
+  ports:
+    - port: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-server
+  template:
+    metadata:
+      labels:
+        app: api-server
+    spec:
+      enableServiceLinks: false
+      initContainers:
+        # No depends_on in Kubernetes: wait for the backing services so the
+        # pod doesn't crash-loop through its first seconds.
+        - name: wait-for-deps
+          image: busybox:1.36
+          command: ["sh", "-c", "for s in postgres:5432 redis:6379 kafka:9092; do until nc -z ${s%:*} ${s#*:}; do echo waiting for $s; sleep 2; done; done"]
+      containers:
+        - name: api-server
+          image: auction-api:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: backend-env
+          env:
+            - name: POSTGRES_URL
+              valueFrom: { secretKeyRef: { name: backend-secrets, key: POSTGRES_URL } }
+            - name: JWT_SECRET
+              valueFrom: { secretKeyRef: { name: backend-secrets, key: JWT_SECRET } }
+            # Postgres connection budget (max_connections = 100): at the
+            # HPA's maxReplicas of 6, 6 x 10 + bid-worker's 20 = 80, leaving
+            # room for a rolling update's surge pods. Without this cap
+            # (default 20 per pod) a scale-out to 6 pods hit "too many
+            # clients" and turned requests into 500s.
+            - { name: POSTGRES_MAX_CONNS, value: "10" }
+            - { name: HTTP_ADDR, value: ":8080" }
+            - { name: BID_RATE_LIMIT_PER_SEC, value: "10" }
+            - { name: CORS_ORIGIN, value: "*" }
+          ports:
+            - containerPort: 8080
+          # Short probe periods so a crashed pod leaves the Service's
+          # endpoints within ~2s and new connections stop landing on it.
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 2
+            failureThreshold: 1
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 10
+            failureThreshold: 3
+          # The HPA's 50% target is measured against this CPU request.
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-server
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - { type: Pods, value: 2, periodSeconds: 15 }
+    # Default is 5 minutes; shortened so a demo shows pods going away again
+    # within about a minute of the load stopping.
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 30 }

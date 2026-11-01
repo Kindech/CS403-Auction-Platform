@@ -1,12 +1,42 @@
 // Shared helpers for the Node-based chaos/scale tests (TC-08, TC-09).
 // Requires Node 22+ (global WebSocket and fetch).
-import { execFileSync, execSync } from "node:child_process";
+//
+// TARGET=k8s runs them against the Kubernetes deployment in k8s/ (namespace
+// "auction") instead of the docker compose stack: database cleanup goes
+// through kubectl exec, and the tests scale/kill pods instead of containers.
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 export const COMPOSE_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../deploy/docker-compose.yml");
+export const K8S = process.env.TARGET === "k8s";
+const NS = process.env.K8S_NAMESPACE || "auction";
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+export function kubectl(...args) {
+  return execFileSync("kubectl", ["-n", NS, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+}
+
+// apiPods lists running, ready api-server pods, oldest first.
+export function apiPods() {
+  const out = kubectl("get", "pods", "-l", "app=api-server", "--sort-by=.metadata.creationTimestamp",
+    "-o", "jsonpath={range .items[*]}{.metadata.name} {.metadata.deletionTimestamp} {.status.containerStatuses[0].ready}{\"\\n\"}{end}");
+  return out.trim().split("\n").map((l) => l.trim().split(/\s+/)).filter((f) => f.length === 2 && f[1] === "true").map((f) => f[0]);
+}
+
+// portForward exposes one pod on localhost (pods aren't reachable from the
+// host directly) and resolves once kubectl reports the tunnel is up.
+export function portForward(pod, localPort) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("kubectl", ["-n", NS, "port-forward", `pod/${pod}`, `${localPort}:8080`], { stdio: ["ignore", "pipe", "pipe"] });
+    const timer = setTimeout(() => { child.kill(); reject(new Error(`port-forward to ${pod} timed out`)); }, 15000);
+    child.stdout.on("data", (d) => {
+      if (String(d).includes("Forwarding from")) { clearTimeout(timer); resolve({ url: `http://localhost:${localPort}`, pod, close: () => child.kill() }); }
+    });
+    child.on("exit", (code) => { clearTimeout(timer); reject(new Error(`port-forward to ${pod} exited (${code})`)); });
+  });
+}
 
 // compose runs `docker compose -f deploy/docker-compose.yml ...args` without a
 // shell, so SQL and JSON arguments need no quoting.
@@ -22,7 +52,12 @@ export function runCmd(envOverride, defaultArgs) {
 }
 
 export function psql(sql) {
-  return compose("exec", "-T", "postgres", "psql", "-U", "auction", "-d", "auction", "-tAc", sql).trim();
+  const args = ["psql", "-U", "auction", "-d", "auction", "-tAc", sql];
+  return (K8S ? kubectl("exec", "postgres-0", "--", ...args) : compose("exec", "-T", "postgres", ...args)).trim();
+}
+
+function redisCli(...args) {
+  return K8S ? kubectl("exec", "redis-0", "--", "redis-cli", ...args) : compose("exec", "-T", "redis", "redis-cli", ...args);
 }
 
 export async function api(base, method, p, body, token) {
@@ -134,5 +169,5 @@ export async function cleanup({ itemId, userIds = [], expectedBids = 0 }) {
     DELETE FROM items WHERE id = ${item};
     DELETE FROM users WHERE id IN (${users});
     COMMIT;`);
-  if (itemId) compose("exec", "-T", "redis", "redis-cli", "DEL", `item:${itemId}:state`, `item:${itemId}:applied`);
+  if (itemId) redisCli("DEL", `item:${itemId}:state`, `item:${itemId}:applied`);
 }

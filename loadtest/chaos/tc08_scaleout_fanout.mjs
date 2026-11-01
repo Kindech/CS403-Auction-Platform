@@ -10,33 +10,68 @@
 //   - names stay masked for everyone but their owner
 // and reports bid -> viewer delivery latency across instances.
 //
-// Usage: node chaos/tc08_scaleout_fanout.mjs
+// Usage: node chaos/tc08_scaleout_fanout.mjs              (docker compose)
+//        TARGET=k8s node chaos/tc08_scaleout_fanout.mjs   (Kubernetes, k8s/)
+// On Kubernetes the extra pod is added by the HorizontalPodAutoscaler itself:
+// the test raises the HPA's minReplicas by one, waits for the new pod, and
+// reaches each pod through its own kubectl port-forward. minReplicas is put
+// back afterward and the HPA removes the pod again.
 // Env:   VIEWERS_PER_INSTANCE (default 50)
-//        SCALE_UP_CMD / SCALE_DOWN_CMD  override how the extra instance is
-//        started/removed (defaults: docker compose run/rm of api-3 on :8083)
-//        API_URLS  comma-separated direct URLs of every instance, new one last
+//        compose only: SCALE_UP_CMD / SCALE_DOWN_CMD override how the extra
+//        instance is started/removed (default: docker compose run/rm of
+//        api-3 on :8083); API_URLS lists every instance's URL, new one last
 import { execFileSync } from "node:child_process";
-import { api, register, createLiveItem, waitFor, sleep, runCmd, Viewer, check, allPassed, percentile, cleanup } from "./lib.mjs";
+import { api, register, createLiveItem, waitFor, sleep, runCmd, Viewer, check, allPassed, percentile, cleanup,
+  K8S, kubectl, apiPods, portForward } from "./lib.mjs";
 
 const PER_INSTANCE = Number(process.env.VIEWERS_PER_INSTANCE || 50);
-const URLS = (process.env.API_URLS || "http://localhost:8081,http://localhost:8082,http://localhost:8083").split(",");
-const NEW_URL = URLS[URLS.length - 1];
-const OLD_URL = URLS[0];
+let URLS, NEW_URL, OLD_URL;
 
-const scaleUp = () => runCmd(process.env.SCALE_UP_CMD, ["run", "-d", "--no-deps", "--name", "deploy-api-3", "-p", "8083:8080", "api-1"]);
-const scaleDown = () => {
-  if (process.env.SCALE_DOWN_CMD) return runCmd(process.env.SCALE_DOWN_CMD);
-  try { execFileSync("docker", ["rm", "-f", "deploy-api-3"], { stdio: "ignore" }); } catch {}
-};
+// Each returns { urls, teardown }, with the new instance's URL last.
+async function scaleUpCompose() {
+  const urls = (process.env.API_URLS || "http://localhost:8081,http://localhost:8082,http://localhost:8083").split(",");
+  const down = () => {
+    if (process.env.SCALE_DOWN_CMD) return runCmd(process.env.SCALE_DOWN_CMD);
+    try { execFileSync("docker", ["rm", "-f", "deploy-api-3"], { stdio: "ignore" }); } catch {}
+  };
+  down(); // leftover from an interrupted run
+  runCmd(process.env.SCALE_UP_CMD, ["run", "-d", "--no-deps", "--name", "deploy-api-3", "-p", "8083:8080", "api-1"]);
+  const newUrl = urls[urls.length - 1];
+  await waitFor(async () => (await fetch(`${newUrl}/healthz`).catch(() => ({ ok: false }))).ok, 30000, `${newUrl} to become healthy`);
+  return { urls, teardown: down };
+}
+
+async function scaleUpK8s() {
+  const origMin = Number(kubectl("get", "hpa", "api-server", "-o", "jsonpath={.spec.minReplicas}"));
+  const before = apiPods();
+  const setMin = (n) => kubectl("patch", "hpa", "api-server", "--type=merge", "-p", JSON.stringify({ spec: { minReplicas: n } }));
+  setMin(before.length + 1);
+  const forwards = [];
+  const teardown = () => { forwards.forEach((f) => f.close()); setMin(origMin); };
+  try {
+    console.log(`    HPA minReplicas ${origMin} -> ${before.length + 1}; waiting for the HPA to add a pod`);
+    await waitFor(() => apiPods().some((p) => !before.includes(p)), 90000, "the HPA to add a ready pod");
+    const added = apiPods().filter((p) => !before.includes(p));
+    const pods = [...before, added[0]];
+    for (const [i, pod] of pods.entries()) forwards.push(await portForward(pod, 18081 + i));
+    forwards.forEach((f) => console.log(`    ${f.url} -> pod ${f.pod}${f.pod === added[0] ? " (added by HPA)" : ""}`));
+    return { urls: forwards.map((f) => f.url), teardown };
+  } catch (e) {
+    teardown();
+    throw e;
+  }
+}
 
 let ctx = {};
 let viewers = [];
+let scaled;
 try {
-  console.log("==> Starting an extra api-server instance that no config knows about");
-  scaleDown(); // leftover from an interrupted run
-  scaleUp();
-  await waitFor(async () => (await fetch(`${NEW_URL}/healthz`).catch(() => ({ ok: false }))).ok, 30000, `${NEW_URL} to become healthy`);
-  console.log(`    ${NEW_URL} is up`);
+  console.log(K8S ? "==> Having the HPA add an api-server pod" : "==> Starting an extra api-server instance that no config knows about");
+  scaled = K8S ? await scaleUpK8s() : await scaleUpCompose();
+  URLS = scaled.urls;
+  NEW_URL = URLS[URLS.length - 1];
+  OLD_URL = URLS[0];
+  console.log(`    new instance at ${NEW_URL} is up`);
 
   console.log("==> Creating throwaway users and a live item");
   const seller = await register(OLD_URL, "tc08-seller", "Tc08 Seller");
@@ -76,8 +111,7 @@ try {
   for (const url of URLS) {
     const onIt = viewers.filter((v) => v.base === url);
     const ok = onIt.filter((v) => v.got("price_update", (e) => e.price === 150) && v.got("price_update", (e) => e.price === 200)).length;
-    check(ok === onIt.length, `${url}${url === NEW_URL ? " (new instance)" : ""}: ${ok}/${onIt.length} viewers got both price_updates`);
-  }
+    check(ok === onIt.length, `${url}${url === NEW_URL ? " (new instance)" : ""}: ${ok}/${onIt.length} viewers got both price_updates`);  }
   check(alphaWs.got("outbid", (e) => e.price === 200) !== undefined, "alpha (on the new instance) got its targeted outbid");
   check(alphaWs.got("bid_rejected") !== undefined, "alpha (on the new instance) got its targeted bid_rejected");
   const leaked = everyone.filter((v) => v !== alphaWs && (v.got("outbid") || v.got("bid_rejected")));
@@ -95,7 +129,7 @@ try {
 } finally {
   (ctx.conns || viewers).forEach((v) => v.close());
   console.log("==> Removing the extra instance and cleaning up test data");
-  scaleDown();
+  try { scaled?.teardown(); } catch (e) { console.log(`    teardown failed: ${e.message}`); }
   await cleanup({ itemId: ctx.itemId, userIds: ctx.userIds, expectedBids: ctx.expectedBids }).catch((e) => console.log(`    cleanup failed: ${e.message}`));
 }
 

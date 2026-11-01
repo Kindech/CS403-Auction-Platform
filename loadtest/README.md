@@ -92,13 +92,30 @@ powershell -ExecutionPolicy Bypass -File loadtest\demo_resilience.ps1
 
 ### ใช้ TC-08/TC-09 กับ Kubernetes
 
-คำสั่งที่ใช้เพิ่ม/ลด/kill instance เปลี่ยนได้ด้วย env var โดยไม่ต้องแก้สคริปต์:
+ตั้ง `TARGET=k8s` แล้วสคริปต์จะทำงานกับ deployment ใน `k8s/` (namespace `auction`) แทน compose:
+
+```powershell
+$env:TARGET="k8s"; node chaos/tc08_scaleout_fanout.mjs
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
+```
+
+- TC-08: ให้ **HPA สร้าง pod ใหม่เอง** (เพิ่ม `minReplicas` ขึ้น 1 ชั่วคราว) แล้วต่อเข้าแต่ละ pod ผ่าน
+  `kubectl port-forward` (port 18081, 18082, ...) จบแล้วคืนค่า `minReplicas`
+- TC-09: force-delete api-server pod ที่เก่าที่สุด แล้วตรวจเพิ่มว่า Kubernetes สร้าง pod มาแทนเอง
+- การลบข้อมูลทดสอบใช้ `kubectl exec postgres-0` / `redis-0` แทน `docker compose exec`
+
+สำหรับ compose เปลี่ยนคำสั่งที่ใช้เพิ่ม/ลด/kill instance ได้ด้วย env var:
 
 | Env | ใช้กับ | ค่าเริ่มต้น |
 |---|---|---|
 | `API_URLS` | TC-08 | `http://localhost:8081,http://localhost:8082,http://localhost:8083` (ตัวสุดท้าย = ตัวใหม่) |
 | `SCALE_UP_CMD` / `SCALE_DOWN_CMD` | TC-08 | `docker compose run ... api-1` เป็น `deploy-api-3` / `docker rm -f deploy-api-3` |
 | `KILL_CMD` / `RESTORE_CMD` | TC-09 | `docker compose kill -s SIGKILL api-1` / `docker compose start api-1` |
+
+`k6/hpa_autoscale_load.js` ไม่ใช่ TC ในรายงาน — เป็นโหลดแบบ "ทุกคนเปิดดูหน้าประมูล" ต่อเนื่อง 2 นาที ใช้โชว์
+HPA บน Kubernetes (`k8s\run-k6.ps1 -Script hpa_autoscale_load.js`) ดู `k8s/README.md`
 
 ## การลบข้อมูลทดสอบ
 

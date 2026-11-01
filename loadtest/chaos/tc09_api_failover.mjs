@@ -13,17 +13,36 @@
 //   - REST keeps answering while api-1 is down
 // api-1 is always restarted at the end, pass or fail.
 //
-// Usage: node chaos/tc09_api_failover.mjs
+// Usage: node chaos/tc09_api_failover.mjs              (docker compose)
+//        TARGET=k8s node chaos/tc09_api_failover.mjs   (Kubernetes, k8s/)
+// On Kubernetes the oldest api-server pod is force-deleted (no graceful
+// shutdown, like a node or process dying); "restore" is just waiting for the
+// Deployment to have replaced it - nobody restarts anything by hand.
 // Env:   BASE_URL (default http://localhost:8080 - nginx), VIEWERS (default 100)
-//        KILL_CMD / RESTORE_CMD  override how the instance is killed/restored
-//        (defaults: docker compose kill -s SIGKILL api-1 / docker compose start api-1)
-import { api, register, createLiveItem, waitFor, sleep, runCmd, Viewer, check, allPassed, percentile, cleanup } from "./lib.mjs";
+//        compose only: KILL_CMD / RESTORE_CMD override how the instance is
+//        killed/restored (defaults: docker compose kill -s SIGKILL api-1 /
+//        docker compose start api-1)
+import { api, register, createLiveItem, waitFor, sleep, runCmd, Viewer, check, allPassed, percentile, cleanup,
+  K8S, kubectl, apiPods } from "./lib.mjs";
 
 const BASE = process.env.BASE_URL || "http://localhost:8080";
 const VIEWERS = Number(process.env.VIEWERS || 100);
 
-const kill = () => runCmd(process.env.KILL_CMD, ["kill", "-s", "SIGKILL", "api-1"]);
-const restore = () => runCmd(process.env.RESTORE_CMD, ["start", "api-1"]);
+let podsBefore = [];
+let victim;
+const kill = () => {
+  if (!K8S) return runCmd(process.env.KILL_CMD, ["kill", "-s", "SIGKILL", "api-1"]);
+  podsBefore = apiPods();
+  victim = podsBefore[0];
+  console.log(`    force-deleting pod ${victim} (of ${podsBefore.length})`);
+  kubectl("delete", "pod", victim, "--grace-period=0", "--force", "--wait=false");
+};
+const restore = async () => {
+  if (!K8S) return runCmd(process.env.RESTORE_CMD, ["start", "api-1"]);
+  await waitFor(() => { const p = apiPods(); return p.length >= podsBefore.length && !p.includes(victim); }, 90000, "the Deployment to replace the pod");
+  const replacement = apiPods().filter((p) => !podsBefore.includes(p));
+  check(replacement.length > 0, `Kubernetes replaced ${victim} with ${replacement.join(", ")} on its own`);
+};
 
 let ctx = { conns: [] };
 let killed = false;
@@ -47,17 +66,17 @@ try {
   await waitFor(() => viewers.every((v) => v.got("price_update", (e) => e.price === 150)), 5000, "price_update 150 everywhere");
   check(true, `all ${VIEWERS} viewers got price 150 before the crash`);
 
-  console.log("==> SIGKILL api-1");
+  console.log(K8S ? "==> Killing an api-server pod" : "==> SIGKILL api-1");
   const killedAt = Date.now();
   kill();
   killed = true;
   await waitFor(() => ctx.conns.some((v) => v.closes > 0), 5000, "dropped connections").catch(() => {});
   await sleep(500);
   const dropped = ctx.conns.filter((v) => v.closes > 0);
-  check(dropped.length > 0, `the crash dropped ${dropped.length}/${ctx.conns.length} connections (the ones that were on api-1)`);
+  check(dropped.length > 0, `the crash dropped ${dropped.length}/${ctx.conns.length} connections (the ones that were on the killed instance)`);
 
-  const items = await api(BASE, "GET", `/items/${item.id}`).catch(() => null);
-  check(items?.id === item.id, "REST GET /api/items/{id} still answers through nginx while api-1 is down");
+  const got = await api(BASE, "GET", `/items/${item.id}`).catch(() => null);
+  check(got?.id === item.id, "REST GET /api/items/{id} still answers through nginx right after the crash");
 
   console.log("==> Waiting for dropped viewers to reconnect via nginx");
   const resynced = (v) => v.events.some((e) => e.type === "sync" && e.conn > 1 && e.price === 150);
@@ -82,8 +101,8 @@ try {
 } finally {
   ctx.conns.forEach((v) => v.close());
   if (killed) {
-    console.log("==> Restarting api-1");
-    try { restore(); } catch (e) { console.log(`    restore failed: ${e.message}`); }
+    console.log(K8S ? "==> Waiting for Kubernetes to replace the pod" : "==> Restarting api-1");
+    try { await restore(); } catch (e) { check(false, `restore failed: ${e.message}`); }
   }
   console.log("==> Cleaning up test data");
   await cleanup(ctx).catch((e) => console.log(`    cleanup failed: ${e.message}`));

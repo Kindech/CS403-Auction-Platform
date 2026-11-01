@@ -1,0 +1,23 @@
+# Kubernetes deployment of the same stack deploy/docker-compose.yml runs,
+# with api-server as a Deployment scaled by a HorizontalPodAutoscaler
+# instead of the fixed api-1/api-2 pair. Apply with:
+#   kubectl apply -k k8s/
+# See k8s/README.md for building the images and installing metrics-server.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: auction
+
+resources:
+  - namespace.yaml
+  - config.yaml
+  - postgres.yaml
+  - redis.yaml
+  - kafka.yaml
+  - api-server.yaml
+  - bid-worker.yaml
+  - frontend.yaml
+
+configMapGenerator:
+  - name: nginx-conf
+    files:
+      - nginx.conf
