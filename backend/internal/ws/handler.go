@@ -138,16 +138,15 @@ func (d *Deps) readLoop(c *Client) {
 			Amount:    in.Amount,
 			Timestamp: time.Now(),
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), models.BidPublishTimeout)
 		if err := d.Producer.PublishBid(ctx, req); err != nil {
-			// Usually the bid never reached Kafka and will never be answered,
-			// so tell the bidder instead of failing silently. Not guaranteed
-			// though: a timed-out write can still land, in which case the
-			// normal price_update follows - hence the UI says "unsure, check
-			// the current price", not "not recorded".
+			// Tell the bidder instead of failing silently. The Kafka client
+			// may still deliver this write later (e.g. once a restarting
+			// broker is back); bid-worker then rejects it as "expired"
+			// (models.BidExpiry), so "not recorded" holds either way.
 			log.Printf("ws: publish bid failed: %v", err)
 			d.Hub.SendToClient(c, Event{
-				Type: EventBidRejected, ItemID: c.ItemID, Reason: "service_unavailable",
+				Type: EventBidRejected, ItemID: c.ItemID, Reason: "service_unavailable", Amount: in.Amount,
 			})
 		}
 		cancel()

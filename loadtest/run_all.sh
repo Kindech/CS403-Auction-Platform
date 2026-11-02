@@ -29,4 +29,10 @@ node chaos/tc08_scaleout_fanout.mjs
 echo "### TC-09 API Server Failover"
 node chaos/tc09_api_failover.mjs
 
+echo "### TC-10 Kafka Restart"
+node chaos/tc10_kafka_restart.mjs
+
+echo "### TC-11 Postgres Outage"
+node chaos/tc11_postgres_outage.mjs
+
 echo "All load/chaos tests passed."

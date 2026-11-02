@@ -71,6 +71,20 @@ type BidRequest struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// BidPublishTimeout is how long an api-server waits for Kafka to take a bid
+// before telling the bidder "service_unavailable".
+const BidPublishTimeout = 3 * time.Second
+
+// BidExpiry is the latest a bid may reach Kafka, measured from
+// BidRequest.Timestamp; the broker refuses older ones (see
+// kafkabus.EnsureBidExpiry). The Kafka client keeps retrying a write after
+// the api-server has stopped waiting, so without this a bid the bidder was
+// told failed could land and win once a restarting broker is back (TC-10).
+// Shorter than BidPublishTimeout so that a write the broker takes just
+// before the api-server gives up still gets its acknowledgement in time;
+// the margin also absorbs clock skew between api-server and broker.
+const BidExpiry = BidPublishTimeout - 500*time.Millisecond
+
 // AuctionState mirrors the Redis hash for one item.
 type AuctionState struct {
 	ItemID       string  `json:"item_id"`

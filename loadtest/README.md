@@ -14,14 +14,16 @@
 | TC-07 | Reconnect Resync *(เพิ่ม)* | §3.6.3 — "ไม่ต้อง reload หน้า" reconnect แล้วได้ state ล่าสุดเสมอ | k6 |
 | TC-08 | Scale-out Fan-out *(เพิ่ม)* | §2.5.9 — เพิ่ม api-server ตัวใหม่ที่ไม่มี config ไหนรู้จัก แล้วทุกตัวได้ event ครบผ่าน Redis Pub/Sub | node |
 | TC-09 | API Server Failover *(เพิ่ม)* | §2.5.9 + §3.6.3 — api-server ตายกลางการประมูล ผู้ใช้ reconnect ผ่าน nginx แล้วได้ราคาล่าสุด และไม่พลาดบิดถัดไป | node |
+| TC-10 | Kafka Restart *(เพิ่ม)* | §2.6.4 — Kafka หยุดแล้วกลับมา ทุกบิดได้คำตอบ, "ระบบขัดข้อง" แปลว่าไม่ถูกบันทึกจริง, ไม่มีบิดหาย/ซ้ำ | node |
+| TC-11 | Postgres Outage *(เพิ่ม)* | §2.6.4 — Postgres ล่มระหว่างประมูล การบิดยัง real-time และพอกลับมา `bids` + `audit_log` ครบไม่ซ้ำ | node |
 
 ## สิ่งที่ต้องมีก่อน
 
 - เปิด compose stack ไว้แล้ว: `cd ../deploy && docker compose up -d --build`
 - ติดตั้ง [k6](https://k6.io/) (หรือใช้ `docker run --rm -i grafana/k6 run - <script.js`)
-- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08, TC-09
-- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08, TC-09 สั่ง `docker compose` เพื่อ kill/เพิ่ม container
-  และลบข้อมูลทดสอบ)
+- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08 ถึง TC-11
+- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08 ถึง TC-11 สั่ง `docker compose` เพื่อ kill/เพิ่ม/หยุด
+  container และลบข้อมูลทดสอบ)
 
 ทุกสคริปต์ใช้ `BASE_URL=http://localhost:8080` (nginx) เป็นค่าเริ่มต้น เปลี่ยนได้ด้วย
 `-e BASE_URL=http://your-host:8080` (k6) หรือ env var `BASE_URL` (node)
@@ -39,6 +41,8 @@ k6 run k6/tc07_reconnect_resync.js
 bash chaos/tc06_worker_crash_replay.sh
 node chaos/tc08_scaleout_fanout.mjs      # ~10 วินาที
 node chaos/tc09_api_failover.mjs         # ~15 วินาที
+node chaos/tc10_kafka_restart.mjs        # ~1 นาที (หยุด Kafka 10 วินาที แล้วรอให้กลับมา)
+node chaos/tc11_postgres_outage.mjs      # ~40 วินาที (หยุด Postgres 15 วินาที)
 ```
 
 หรือรันทั้งหมดด้วย `./run_all.sh` (หยุดทันทีที่ตัวไหน fail)
@@ -90,7 +94,69 @@ powershell -ExecutionPolicy Bypass -File loadtest\demo_resilience.ps1
 ผลที่ได้ระหว่างพัฒนา: crash ทำให้หลุด 50/101 connection, ทั้ง 50 กลับมาได้ราคาล่าสุด
 (p50 ≈ 1.5s, ช้าสุด ≈ 3.5s ตาม backoff ของ frontend), บิดหลัง crash ถึงครบ 100/100 ใน ~18ms
 
-### ใช้ TC-08/TC-09 กับ Kubernetes
+## TC-10 Kafka Restart — ทำอะไรบ้าง
+
+1. สร้าง user ทดสอบ 2 คนและสินค้า 1 ชิ้น ต่อ viewer 20 คน + bidder 1 คน
+2. bidder บิดทีละครั้งแล้ว**รอคำตอบก่อนบิดต่อ** (เหมือนคนกดบิดแล้วดูผล) ราคาเพิ่มทีละ 10
+3. บิด 3 ครั้งตอน Kafka ปกติ → **หยุด Kafka 10 วินาที** (`docker compose stop kafka` หรือ scale
+   StatefulSet เป็น 0 บน K8s) ระหว่างนั้นบิดต่อ → **เปิด Kafka กลับ** แล้วบิดต่อจนผ่าน แล้วบิดอีก 3 ครั้ง
+   ไม่มีการรีสตาร์ท api-server หรือ bid-worker
+4. ตรวจว่า:
+   - ทุกบิดได้คำตอบ (รับ หรือปฏิเสธพร้อมเหตุผล) ไม่มีบิดเงียบหาย
+   - บิดตอน Kafka ล่มได้ `service_unavailable` ทุกตัว
+   - **ไม่มีบิดที่ได้ `service_unavailable` ถูกรับทีหลัง** ตอน Kafka กลับมา
+   - ระบบกลับมาบิดได้เอง และบิดหลังจากนั้นผ่านทั้งหมด
+   - Postgres มีบิดที่รับตรงกับที่ bidder เห็นทุกตัว ไม่มี `request_id` ซ้ำ, ราคาใน Redis = บิดสุดท้าย
+   - viewer ทุกคนเห็นทุกราคาที่รับ เรียงลำดับถูก
+5. เปิด Kafka กลับเสมอ (แม้ fail) และลบข้อมูลทดสอบ
+
+**ปัญหาที่ test นี้เจอ (แก้แล้ว):** รอบแรกบิด 6 ตัวที่ได้ `service_unavailable` ถูกรับทีหลังตอน Kafka
+กลับมา ช้าสุด ~40 วินาที เพราะ Kafka client (kafka-go `Writer`) เก็บข้อความไว้ในคิวแล้ว retry ต่อเอง
+แม้ api-server จะเลิกรอไปแล้ว ผู้ใช้ที่ถูกบอกว่าบิดไม่เข้าจึงอาจกลายเป็นผู้นำโดยไม่รู้ตัว แก้โดยให้ **broker
+ปฏิเสธบิดที่มาถึงช้ากว่า 2.5 วินาที** นับจากเวลาที่บิด (`models.BidExpiry` → topic config
+`message.timestamp.before.max.ms`, api-server ตั้งให้ตอน start) ซึ่งสั้นกว่าเวลาที่ api-server รอ (3 วินาที)
+บิดที่ได้ `service_unavailable` จึงไม่ถูกบันทึกแน่นอน และหน้าเว็บบอกแบบนั้นได้ตรง ๆ
+
+ปัญหาที่สองที่เจอ: หลังเปิด Kafka ต้องรอ ~37 วินาทีกว่าจะบิดได้ log ของ broker แสดงว่ามันรอ consumer
+ตัวเก่าของ `bid-worker` (ก่อน restart) จน `session.timeout` 30 วินาทีหมด แล้วจึงแจก partition ให้ตัวที่
+join ใหม่ ลด `SessionTimeout` ของ reader เหลือ 10 วินาที (heartbeat ทุก 3 วินาทีจึงยังห่างไกลจากเพดาน)
+
+ผลหลังแก้: compose — บิดตอนล่มได้ `service_unavailable` 4/4, ไม่มีตัวไหนถูกรับทีหลัง, บิดได้อีกครั้ง
+13.8 วินาทีหลังเปิด Kafka, Postgres 7/7 ไม่ซ้ำ, viewer 20/20 Kubernetes — ผลเหมือนกัน กลับมาใน 18.3
+วินาที (pod ของ Kafka boot ช้ากว่า)
+
+## TC-11 Postgres Outage — ทำอะไรบ้าง
+
+1. สร้าง user ทดสอบ 2 คนและสินค้า 1 ชิ้น ต่อ viewer 20 คน + bidder 1 คน
+2. bidder บิดทีละครั้งแล้วรอคำตอบ: 3 ครั้งตอนปกติ → **หยุด Postgres 15 วินาที** และบิดต่อตลอดช่วงนั้น
+   → เปิด Postgres กลับ → บิดอีก 3 ครั้ง
+3. ตรวจว่า:
+   - ทุกบิดถูกรับ รวมทั้งตอน Postgres ล่ม และยัง **real-time** (ช้าสุดต้องไม่เกิน 1 วินาที)
+   - viewer ทุกคนเห็นทุกราคา เรียงลำดับถูก
+   - พอ Postgres กลับมา bid-worker เขียนบิดที่ค้างเองจน `bids` ตรงกับที่รับทุกตัว ไม่ซ้ำ
+   - Kafka consumer lag กลับเป็น 0 (commit offset หลังเขียนสำเร็จ ไม่เหลืออะไรให้ replay)
+   - `audit_log` มี `bid.accepted` ครบทุกบิด
+4. แสดงด้วยว่า REST ที่ต้องอ่าน Postgres (`GET /api/items/{id}`) ตอบ 500 ระหว่างล่ม — เป็นข้อจำกัดที่
+   คาดไว้ หน้าประมูลที่เปิดอยู่แล้วยังบิดได้ แต่ผู้ชมใหม่เปิดหน้าไม่ได้จนกว่า Postgres จะกลับ
+5. เปิด Postgres กลับเสมอ และลบข้อมูลทดสอบ
+
+**ปัญหาที่ test นี้เจอ (แก้แล้ว):**
+- `audit_log` หาย 30 จาก 35 บิด — audit ของบิดเคยเขียนแบบยิงแล้วลืม (timeout 3 วินาที) แยกจาก `bids`
+  ตอนนี้เขียนใน statement เดียวกับแถว `bids` (`BatchInsertBids`) จึง retry ไปด้วยกัน และไม่ซ้ำตอน replay
+  เพราะเขียน audit เฉพาะเมื่อแถว `bids` ใหม่จริง
+- บิดบางตัวช้า ~1.8 วินาที — lifecycle tick (เปิด/ปิดประมูล) query Postgres บน loop เดียวกับการตัดสินบิด
+  พอ DB ล่ม query ค้างรอ timeout ตอนนี้ย้ายการอ่าน Postgres ไปอีก goroutine (`lifecycleLoop`) ส่วนที่
+  แตะ state ใน Redis ยังอยู่บน loop เดิม การปิดประมูลจึงยังไม่ชนกับการตัดสินบิด
+
+ยังไม่ครอบคลุม: ถ้ามีบิดช่วง anti-snipe ระหว่าง Postgres ล่ม `end_time` ใหม่จะอยู่ใน Redis (ซึ่งเป็นตัวที่
+ใช้ตัดสินจริง) แต่การบันทึกลง `items.end_time` ยังเป็นแบบยิงแล้วลืมและจะหายไป และการปิดประมูลที่ถึงเวลา
+ระหว่างล่มจะเลื่อนไปทำตอน Postgres กลับมา (บิดหลังเวลาปิดถูกปฏิเสธตามปกติเพราะตัดสินจาก Redis)
+
+ผลหลังแก้: compose — บิดระหว่างล่มผ่าน 38/38 p50 15ms ช้าสุด 18ms (เท่าตอนปกติ), เขียนบิดที่ค้าง
+ครบ 10 วินาทีหลังเปิด Postgres (`writeLoop` retry แบบ backoff สูงสุด 10 วินาที), `bids` 44/44,
+`audit_log` 44/44, Kafka lag 0 Kubernetes — ผลเหมือนกัน ช้าสุด 24ms
+
+### ใช้ TC-08 ถึง TC-11 กับ Kubernetes
 
 ตั้ง `TARGET=k8s` แล้วสคริปต์จะทำงานกับ deployment ใน `k8s/` (namespace `auction`) แทน compose:
 
@@ -104,6 +170,8 @@ $env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
 - TC-08: ให้ **HPA สร้าง pod ใหม่เอง** (เพิ่ม `minReplicas` ขึ้น 1 ชั่วคราว) แล้วต่อเข้าแต่ละ pod ผ่าน
   `kubectl port-forward` (port 18081, 18082, ...) จบแล้วคืนค่า `minReplicas`
 - TC-09: force-delete api-server pod ที่เก่าที่สุด แล้วตรวจเพิ่มว่า Kubernetes สร้าง pod มาแทนเอง
+- TC-10 / TC-11: หยุด Kafka / Postgres ด้วย `kubectl scale statefulset <ชื่อ> --replicas=0` แล้วเปิดกลับ
+  ด้วย `--replicas=1` (ข้อมูลอยู่ใน PVC ไม่หาย)
 - การลบข้อมูลทดสอบใช้ `kubectl exec postgres-0` / `redis-0` แทน `docker compose exec`
 
 สำหรับ compose เปลี่ยนคำสั่งที่ใช้เพิ่ม/ลด/kill instance ได้ด้วย env var:
@@ -113,13 +181,15 @@ $env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
 | `API_URLS` | TC-08 | `http://localhost:8081,http://localhost:8082,http://localhost:8083` (ตัวสุดท้าย = ตัวใหม่) |
 | `SCALE_UP_CMD` / `SCALE_DOWN_CMD` | TC-08 | `docker compose run ... api-1` เป็น `deploy-api-3` / `docker rm -f deploy-api-3` |
 | `KILL_CMD` / `RESTORE_CMD` | TC-09 | `docker compose kill -s SIGKILL api-1` / `docker compose start api-1` |
+| `STOP_CMD` / `START_CMD` | TC-10, TC-11 | `docker compose stop kafka` / `docker compose start kafka` (TC-11: `postgres`) |
+| `DOWN_MS` | TC-10, TC-11 | ระยะที่หยุด service: 10000 / 15000 ms |
 
 `k6/hpa_autoscale_load.js` ไม่ใช่ TC ในรายงาน — เป็นโหลดแบบ "ทุกคนเปิดดูหน้าประมูล" ต่อเนื่อง 2 นาที ใช้โชว์
 HPA บน Kubernetes (`k8s\run-k6.ps1 -Script hpa_autoscale_load.js`) ดู `k8s/README.md`
 
 ## การลบข้อมูลทดสอบ
 
-TC-08 และ TC-09 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
+TC-08 ถึง TC-11 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
 Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก่อนลบจะรอให้ `bid-worker`
 เขียนแถว `bids` ของสินค้านั้นลง Postgres ครบก่อน เพราะถ้าลบสินค้าขณะ batch ยังไม่ได้เขียน INSERT
 จะชน foreign key แล้ว `bid-worker` จะ retry batch นั้นไม่หยุด ทำให้การเขียนครั้งต่อ ๆ ไปค้างหมด
@@ -135,7 +205,7 @@ Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก�
 - TC-02/TC-04/TC-05/TC-07 ตรวจจริงผ่าน `check()` ใน `default`/`teardown` — ถ้าต้องการรู้ว่า fail
   ตรงไหน ให้ดู console output รอบ ๆ `"exactly 1 bid was accepted"` เป็นต้น
 - TC-06 เป็น bash script พิมพ์ `PASS`/`FAIL` และ exit 0/1 ตามนั้น เปิด `bid-worker` กลับให้เสมอ
-- TC-08/TC-09 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
+- TC-08 ถึง TC-11 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
 
 ## ปรับค่า
 
@@ -143,7 +213,8 @@ Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก�
   ตารางในรายงาน)
 - `ANTI_SNIPE_WINDOW_SEC` เปลี่ยนช่วง window ที่ TC-05 สมมติไว้ ต้องตรงกับ `ANTI_SNIPE_WINDOW`
   ใน `deploy/docker-compose.yml` (ค่าเริ่มต้น 60s)
-- `VIEWERS_PER_INSTANCE` (TC-08, ค่าเริ่มต้น 50) และ `VIEWERS` (TC-09, ค่าเริ่มต้น 100)
+- `VIEWERS_PER_INSTANCE` (TC-08, ค่าเริ่มต้น 50) และ `VIEWERS` (TC-09 ค่าเริ่มต้น 100, TC-10/TC-11
+  ค่าเริ่มต้น 20)
 
 ## ดูผลใน Grafana
 
@@ -163,3 +234,4 @@ VUs, request rate, p99 duration และ check pass rate แบบสดระ�
 
 TC-08/TC-09 ไม่ได้ใช้ k6 จึงไม่ push เข้า Prometheus และรันแค่ไม่กี่วินาที ซึ่งสั้นกว่ารอบ scrape
 5 วินาที กราฟใน Grafana จึงแทบไม่เห็น ให้ดูผลจากที่สคริปต์พิมพ์ออกมาแทน (มี latency p50/p95 ให้แล้ว)
+TC-10/TC-11 ก็ไม่ได้ใช้ k6 เช่นกัน และพิมพ์เวลาตอบของทุกบิดออกมาให้แล้ว

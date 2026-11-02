@@ -265,11 +265,19 @@ type BidInsert struct {
 	Status    models.BidStatus
 	Reason    string
 	At        time.Time
+	// AuditDetails is the audit_log entry's details for this decision
+	// (action bid.accepted / bid.rejected follows from Status).
+	AuditDetails string
 }
 
-// BatchInsertBids writes a batch of bid audit records in one round trip.
-// Idempotent per RequestID: a bid Kafka re-delivers after it was already
-// written is skipped, so retrying or replaying a batch never duplicates rows.
+// BatchInsertBids writes a batch of bids, each with its audit_log entry, in
+// one round trip and one transaction. Idempotent per RequestID: a bid Kafka
+// re-delivers after it was already written is skipped - its audit entry
+// too, since that is only inserted alongside a newly inserted bids row - so
+// retrying or replaying a batch never duplicates either.
+//
+// The audit entry used to be a separate fire-and-forget insert, which
+// silently lost every decision made while Postgres was down (TC-11).
 func BatchInsertBids(ctx context.Context, pool *pgxpool.Pool, bids []BidInsert) error {
 	if len(bids) == 0 {
 		return nil
@@ -280,10 +288,18 @@ func BatchInsertBids(ctx context.Context, pool *pgxpool.Pool, bids []BidInsert) 
 		if b.RequestID != "" { // messages produced before request_id existed
 			requestID = &b.RequestID
 		}
+		action := "bid.accepted"
+		if b.Status != models.BidAccepted {
+			action = "bid.rejected"
+		}
 		batch.Queue(
-			`INSERT INTO bids (request_id, item_id, user_id, amount, status, reason, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)
-			 ON CONFLICT (request_id) DO NOTHING`,
-			requestID, b.ItemID, b.UserID, b.Amount, b.Status, b.Reason, b.At,
+			`WITH ins AS (
+			   INSERT INTO bids (request_id, item_id, user_id, amount, status, reason, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)
+			   ON CONFLICT (request_id) DO NOTHING
+			   RETURNING item_id, user_id, created_at)
+			 INSERT INTO audit_log (user_id, action, entity_type, entity_id, details, created_at)
+			 SELECT user_id, $8, 'item', item_id::text, $9, created_at FROM ins`,
+			requestID, b.ItemID, b.UserID, b.Amount, b.Status, b.Reason, b.At, action, b.AuditDetails,
 		)
 	}
 	br := pool.SendBatch(ctx, batch)

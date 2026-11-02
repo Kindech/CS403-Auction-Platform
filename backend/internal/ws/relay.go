@@ -24,6 +24,7 @@ func (h *Hub) RelayEvents(ctx context.Context, rdb *redis.Client) {
 			SoftExtended: m.SoftExtended,
 			TargetUserID: m.TargetUserID,
 			Reason:       m.Reason,
+			Amount:       m.Amount,
 			WinnerName:   m.WinnerName,
 			FinalPrice:   m.FinalPrice,
 			NameOwnerID:  m.NameOwnerID,

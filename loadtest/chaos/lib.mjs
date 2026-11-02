@@ -1,4 +1,4 @@
-// Shared helpers for the Node-based chaos/scale tests (TC-08, TC-09).
+// Shared helpers for the Node-based chaos/scale tests (TC-08 to TC-11).
 // Requires Node 22+ (global WebSocket and fetch).
 //
 // TARGET=k8s runs them against the Kubernetes deployment in k8s/ (namespace
@@ -56,8 +56,58 @@ export function psql(sql) {
   return (K8S ? kubectl("exec", "postgres-0", "--", ...args) : compose("exec", "-T", "postgres", ...args)).trim();
 }
 
-function redisCli(...args) {
+export function redisCli(...args) {
   return K8S ? kubectl("exec", "redis-0", "--", "redis-cli", ...args) : compose("exec", "-T", "redis", "redis-cli", ...args);
+}
+
+// stopService / startService take a backing service ("kafka", "postgres")
+// down and bring it back with its data: docker compose stop/start, or on
+// Kubernetes scaling its StatefulSet to 0 and back to 1 (the PVC survives).
+// Override with STOP_CMD / START_CMD.
+export function stopService(name) {
+  if (process.env.STOP_CMD) return runCmd(process.env.STOP_CMD);
+  if (!K8S) return compose("stop", name);
+  kubectl("scale", "statefulset", name, "--replicas=0");
+  try { kubectl("wait", "--for=delete", `pod/${name}-0`, "--timeout=90s"); } catch { /* already gone */ }
+}
+export function startService(name) {
+  if (process.env.START_CMD) return runCmd(process.env.START_CMD);
+  if (!K8S) return compose("start", name);
+  kubectl("scale", "statefulset", name, "--replicas=1");
+}
+
+// kafkaLag is how many bid-requests messages bid-worker has not committed
+// yet, summed over partitions (the LAG column of kafka-consumer-groups.sh).
+export function kafkaLag(group = "bid-worker") {
+  const args = ["/opt/kafka/bin/kafka-consumer-groups.sh", "--bootstrap-server", "localhost:9092", "--describe", "--group", group];
+  const out = K8S ? kubectl("exec", "kafka-0", "--", ...args) : compose("exec", "-T", "kafka", ...args);
+  return out.split("\n").filter((l) => l.includes("bid-requests"))
+    .reduce((sum, l) => sum + (Number(l.trim().split(/\s+/)[5]) || 0), 0);
+}
+
+// bidAndWait sends one bid and waits for its outcome, the way a user clicks
+// and watches the result: the bidder's own price_update at that amount
+// (accepted) or a bid_rejected for that amount (with its reason). "none"
+// means no answer within timeoutMs - a silently lost bid.
+export async function bidAndWait(bidder, amount, timeoutMs = 20000) {
+  const from = bidder.events.length;
+  const sentAt = Date.now();
+  bidder.bid(amount);
+  let res;
+  await waitFor(() => {
+    const e = bidder.events.slice(from).find((e) => (e.type === "price_update" || e.type === "bid_rejected") && (e.price ?? e.amount) === amount);
+    if (e) res = { amount, sentAt, at: e.at, outcome: e.type === "price_update" ? "accepted" : "rejected", reason: e.reason || "" };
+    return !!e;
+  }, timeoutMs, `outcome of bid ${amount}`).catch(() => {});
+  return res || { amount, sentAt, at: Date.now(), outcome: "none", reason: "" };
+}
+
+// dbBids is what Postgres holds for an item: accepted amounts in order, row
+// count, and rows that share a request_id (must be 0 - replays are no-ops).
+export function dbBids(itemId) {
+  const [accepted, rows, dups] = psql(`SELECT coalesce(string_agg(amount::text, ',' ORDER BY amount) FILTER (WHERE status='accepted'), ''),
+    count(*), count(*) - count(DISTINCT request_id) FROM bids WHERE item_id='${itemId}'`).split("|");
+  return { accepted: accepted ? accepted.split(",").map(Number) : [], rows: Number(rows), dups: Number(dups) };
 }
 
 export async function api(base, method, p, body, token) {

@@ -51,6 +51,19 @@ decoupled และ event-sequenced ออกแบบมาให้รับ t
 เขียนลง Postgres สำเร็จแล้วเท่านั้น ถ้า `bid-worker` ตายกลาง batch ข้อความเหล่านั้นจะถูกส่งซ้ำให้
 instance ที่มาแทน (รายงาน §2.6.4) ดู `loadtest/chaos/tc06_worker_crash_replay.sh`
 
+**ถ้า Postgres ล่ม การบิดยังทำงาน:** การตัดสินบิดใช้แค่ Kafka + Redis ส่วน Postgres เป็นแค่บันทึก
+ถาวร `bid-worker` เขียนแถว `bids` พร้อม `audit_log` ของบิดนั้นใน statement เดียวผ่านคิวที่ retry
+จนสำเร็จ (`writeLoop`) และอ่าน Postgres สำหรับเปิด/ปิดประมูลใน goroutine แยก (`lifecycleLoop`)
+loop ที่ตัดสินบิดจึงไม่ต้องรอ Postgres เลย พอ Postgres กลับมาบันทึกที่ค้างจะถูกเขียนครบเอง ข้อจำกัด:
+REST ที่ต้องอ่าน Postgres (รายการสินค้า, login, เปิดหน้าประมูลใหม่) ใช้ไม่ได้ระหว่างนั้น — ทดสอบด้วย
+TC-11
+
+**ถ้า Kafka ล่ม ผู้ใช้รู้ทันที:** api-server รอ Kafka 3 วินาที (`models.BidPublishTimeout`) ถ้าไม่ได้
+จะตอบ `service_unavailable` และ broker ถูกตั้งให้ปฏิเสธบิดที่มาถึงช้ากว่า 2.5 วินาทีนับจากเวลาที่บิด
+(`models.BidExpiry` → topic config `message.timestamp.before.max.ms`, api-server ตั้งให้ตอน start)
+เพราะ Kafka client ยัง retry ข้อความเองต่อหลัง api-server เลิกรอ ถ้าไม่มีกฎนี้ บิดที่ผู้ใช้ถูกบอกว่า
+"ไม่ถูกบันทึก" จะเข้าระบบทีหลังตอน Kafka กลับมาได้ — ทดสอบด้วย TC-10
+
 **ทำไมส่งผลการบิดผ่าน Redis Pub/Sub:** WebSocket ของแต่ละเบราว์เซอร์ค้างอยู่กับ api-server
 ตัวที่ nginx เลือกให้ บิดที่ผ่านทุกครั้งจึงต้องไปถึง api-server *ทุกตัว* `bid-worker` publish
 ผลครั้งเดียวลง channel `auction:events` (`internal/eventbus`) และ api-server ทุกตัว subscribe
@@ -322,10 +335,10 @@ npm run dev   # proxy /api และ /ws ไปที่ http://localhost:8080 �
 
 ## ทดสอบ Load & ความถูกต้อง
 
-`loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 5 test เพื่อพิสูจน์สิ่งที่รายงาน
+`loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 7 test เพื่อพิสูจน์สิ่งที่รายงาน
 กล่าวไว้ในส่วนอื่นแต่ตารางไม่มี scenario (TC-05 soft-close extension, TC-06 worker crash/replay,
-TC-07 reconnect resync, TC-08 scale-out fan-out, TC-09 api-server failover) รายละเอียดแต่ละตัว
-และวิธีอ่านผลอยู่ใน `loadtest/README.md`
+TC-07 reconnect resync, TC-08 scale-out fan-out, TC-09 api-server failover, TC-10 Kafka restart,
+TC-11 Postgres outage) รายละเอียดแต่ละตัว และวิธีอ่านผลอยู่ใน `loadtest/README.md`
 
 ทดสอบการ scale และ failover ของ api-server ได้เองด้วยคำสั่งเดียว (Node.js 22+, เปิด stack ไว้แล้ว):
 
@@ -336,6 +349,20 @@ node chaos/tc09_api_failover.mjs      # kill api-1 กลางการปร�
 ```
 
 ทั้งสองตัวพิมพ์ `PASS`/`FAIL` ทีละข้อ และลบ container กับข้อมูลทดสอบที่สร้างทิ้งเองตอนจบ
+
+ทดสอบตอน Kafka หรือ Postgres ล่มกลางการประมูล (หยุด service จริงแล้วเปิดกลับเอง):
+
+```bash
+cd loadtest
+node chaos/tc10_kafka_restart.mjs     # หยุด Kafka 10 วินาที: ทุกบิดได้คำตอบ, "ระบบขัดข้อง" = ไม่ถูกบันทึกจริง
+node chaos/tc11_postgres_outage.mjs   # หยุด Postgres 15 วินาที: บิดยัง real-time, bids/audit_log ครบหลังกลับมา
+```
+
+ทั้งสองตัวพิมพ์ผลของทุกบิด (`[down] bid 150 -> accepted in 16ms` เป็นต้น) ให้เห็นว่าระหว่างล่มเกิดอะไรขึ้น
+ลองเองผ่านหน้าเว็บก็ได้: เปิดหน้าประมูลไว้แล้ว `docker compose -f deploy/docker-compose.yml stop postgres`
+→ บิดต่อได้ปกติ → `start postgres` แล้วดูใน pgAdmin ว่าบิดระหว่างนั้นอยู่ใน `bids` และ `audit_log` ครบ
+หรือ `stop kafka` → บิดแล้วจะได้ป๊อปอัป "ระบบขัดข้องชั่วคราว การเสนอราคานี้ไม่ถูกบันทึก" → `start kafka`
+แล้วรอ ~15 วินาที ราคาจะไม่เปลี่ยนจากบิดที่ถูกปฏิเสธไป และบิดใหม่ผ่านตามปกติ
 
 ```bash
 cd loadtest
@@ -397,7 +424,7 @@ Deployment ที่ **HorizontalPodAutoscaler เพิ่ม/ลด pod เอ
 kubectl apply -k k8s
 ```
 
-วิธีติดตั้ง (build image, metrics-server) วิธีดู HPA scale สด, self-healing, การรัน TC-08/TC-09
+วิธีติดตั้ง (build image, metrics-server) วิธีดู HPA scale สด, self-healing, การรัน TC-08 ถึง TC-11
 บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
 
 ผลสำคัญ: ยิงโหลด 300 VU ต่อเนื่อง HPA เพิ่ม api-server จาก 2 → 6 pod แล้วลดกลับเมื่อโหลดหยุด

@@ -26,14 +26,14 @@ type Worker struct {
 	consumer *kafkabus.Consumer
 	notifier *Notifier
 
-	// While Postgres is failing, lifecycle ticks back off so their timeouts
-	// can't keep stalling the adjudication loop they share.
-	lifecycleBackoff time.Duration
-	lifecycleNextAt  time.Time
+	// finalized remembers items this worker just finalized, so a lifecycle
+	// snapshot read before that can't bring one back. Only touched by Run's
+	// goroutine.
+	finalized map[string]time.Time
 }
 
 func New(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, consumer *kafkabus.Consumer, notifier *Notifier) *Worker {
-	return &Worker{cfg: cfg, pool: pool, rdb: rdb, consumer: consumer, notifier: notifier}
+	return &Worker{cfg: cfg, pool: pool, rdb: rdb, consumer: consumer, notifier: notifier, finalized: map[string]time.Time{}}
 }
 
 type fetchResult struct {
@@ -58,11 +58,15 @@ const writeQueueBatches = 1024
 // ticker (activate/finalize items) safe to interleave with bid processing
 // for the same item.
 //
-// Postgres is kept off this loop: batches go to writeLoop, so a slow or
-// down database delays the audit trail, never bid adjudication.
+// Postgres is kept off this loop: batches go to writeLoop and lifecycle
+// reads to lifecycleLoop, so a slow or down database delays the audit
+// trail, never bid adjudication.
 func (w *Worker) Run(ctx context.Context) {
 	msgCh := make(chan fetchResult, 64)
 	go w.fetchLoop(ctx, msgCh)
+
+	lifecycleCh := make(chan lifecycleSnapshot)
+	go w.lifecycleLoop(ctx, lifecycleCh)
 
 	writeCh := make(chan []pendingInsert, writeQueueBatches)
 	writerDone := make(chan struct{})
@@ -73,8 +77,6 @@ func (w *Worker) Run(ctx context.Context) {
 
 	flushTicker := time.NewTicker(w.cfg.BatchInterval)
 	defer flushTicker.Stop()
-	lifecycleTicker := time.NewTicker(w.cfg.TickInterval)
-	defer lifecycleTicker.Stop()
 
 	var buffer []pendingInsert
 	enqueue := func() {
@@ -113,8 +115,8 @@ func (w *Worker) Run(ctx context.Context) {
 		case <-flushTicker.C:
 			enqueue()
 
-		case <-lifecycleTicker.C:
-			w.runLifecycle(ctx)
+		case snap := <-lifecycleCh:
+			w.applyLifecycle(ctx, snap)
 		}
 	}
 }
@@ -174,17 +176,17 @@ func (w *Worker) writeLoop(ctx context.Context, writeCh <-chan []pendingInsert) 
 }
 
 // handleBid adjudicates one bid: read state, decide, write state, notify.
-// It never blocks on Postgres itself - the audit_log/bids writes it kicks
-// off run in their own goroutines so a slow disk write can never add
-// latency to the real-time broadcast path.
+// It never blocks on Postgres itself - the returned bids row (and its
+// audit_log entry) is written by writeLoop, so a slow or down database can
+// never add latency to the real-time broadcast path.
 func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidInsert {
 	start := time.Now()
 	defer func() { metrics.BidProcessingDuration.Observe(time.Since(start).Seconds()) }()
 
 	reject := func(reason string) db.BidInsert {
-		w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: reason})
-		w.logBidDecision(req, false, reason)
-		return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: reason, At: req.Timestamp}
+		w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: reason, Amount: req.Amount})
+		metrics.BidsTotal.WithLabelValues("rejected", reason).Inc()
+		return bidRecord(req, false, reason)
 	}
 
 	// The api-server already filters these out; re-checked here because an
@@ -199,20 +201,21 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 	// A replay (worker crashed after applying this bid but before its batch
 	// reached Postgres) must be recorded as the acceptance it was. Running it
 	// through Decide again would compare it against a price that already
-	// includes it and log it as "bid_too_low". Nothing else to do: state,
-	// broadcast and audit_log entry all happened the first time.
+	// includes it and log it as "bid_too_low". State and broadcast happened
+	// the first time; the bids row and its audit_log entry are written now
+	// unless the first attempt's batch already was (then this is a no-op).
 	if applied, err := redisstate.WasApplied(ctx, w.rdb, req.ItemID, req.RequestID); err != nil {
 		log.Printf("worker: redis applied-check failed for item %s: %v", req.ItemID, err)
 	} else if applied {
 		log.Printf("worker: replayed bid %s already applied to item %s - recording as accepted", req.RequestID, req.ItemID)
-		return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidAccepted, At: req.Timestamp}
+		return bidRecord(req, true, "")
 	}
 
 	state, ok, err := redisstate.Get(ctx, w.rdb, req.ItemID)
 	if err != nil {
 		log.Printf("worker: redis get failed for item %s: %v", req.ItemID, err)
-		w.logBidDecision(req, false, "internal_error")
-		return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidRejected, Reason: "internal_error", At: req.Timestamp}
+		metrics.BidsTotal.WithLabelValues("rejected", "internal_error").Inc()
+		return bidRecord(req, false, "internal_error")
 	}
 	if !ok {
 		return reject("auction_not_live")
@@ -235,7 +238,7 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 		EndTimeMs: out.NewState.EndTimeMs, MinIncrement: out.NewState.MinIncrement,
 		SoftExtended: out.SoftExtended, NameOwnerID: out.NewState.BidderID,
 	})
-	w.logBidDecision(req, true, "")
+	metrics.BidsTotal.WithLabelValues("accepted", "").Inc()
 
 	// The person who was leading before this bid just got overtaken - tell
 	// them directly (not the whole room) so they don't have to notice it
@@ -258,30 +261,22 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 		}()
 	}
 
-	return db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, Status: models.BidAccepted, At: req.Timestamp}
+	return bidRecord(req, true, "")
 }
 
-// logBidDecision records the bid-adjudication outcome in audit_log - a
-// chronological view of every decision the worker makes, separate from
-// (and complementary to) the per-item bids table. Fire-and-forget on
-// purpose: never let an audit write add latency to bid adjudication.
-func (w *Worker) logBidDecision(req models.BidRequest, accepted bool, reason string) {
-	action := "bid.accepted"
-	details := fmt.Sprintf("amount=%.2f", req.Amount)
+// bidRecord is the bids row for one decision, with its audit_log entry
+// (action bid.accepted / bid.rejected) - a chronological view of every
+// decision the worker makes, complementing the per-item bids table. Both
+// are written together by writeLoop, so the audit trail survives a Postgres
+// outage exactly like the bids do.
+func bidRecord(req models.BidRequest, accepted bool, reason string) db.BidInsert {
+	ins := db.BidInsert{RequestID: req.RequestID, ItemID: req.ItemID, UserID: req.UserID, Amount: req.Amount, At: req.Timestamp,
+		Status: models.BidAccepted, AuditDetails: fmt.Sprintf("amount=%.2f", req.Amount)}
 	if !accepted {
-		action = "bid.rejected"
-		details = fmt.Sprintf("amount=%.2f reason=%s", req.Amount, reason)
-		metrics.BidsTotal.WithLabelValues("rejected", reason).Inc()
-	} else {
-		metrics.BidsTotal.WithLabelValues("accepted", "").Inc()
+		ins.Status, ins.Reason = models.BidRejected, reason
+		ins.AuditDetails = fmt.Sprintf("amount=%.2f reason=%s", req.Amount, reason)
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if err := db.LogAudit(ctx, w.pool, req.UserID, action, "item", req.ItemID, details, ""); err != nil {
-			log.Printf("worker: log audit for item %s: %v", req.ItemID, err)
-		}
-	}()
+	return ins
 }
 
 // flush durably writes the audit batch to Postgres and only then commits

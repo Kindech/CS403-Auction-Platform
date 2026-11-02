@@ -41,6 +41,7 @@ type Message struct {
 	SoftExtended bool    `json:"soft_extended,omitempty"`
 	TargetUserID string  `json:"target_user_id,omitempty"`
 	Reason       string  `json:"reason,omitempty"`
+	Amount       float64 `json:"amount,omitempty"` // bid_rejected: the amount that was rejected
 	WinnerName   string  `json:"winner_name,omitempty"`
 	FinalPrice   float64 `json:"final_price,omitempty"`
 	// NameOwnerID: the user ID that BidderName/WinnerName belongs to, so

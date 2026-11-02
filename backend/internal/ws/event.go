@@ -17,8 +17,9 @@ type Event struct {
 	SoftExtended bool    `json:"soft_extended,omitempty"`
 
 	// bid_rejected - routed to exactly one connection
-	TargetUserID string `json:"-"` // never serialized to the browser
-	Reason       string `json:"reason,omitempty"`
+	TargetUserID string  `json:"-"` // never serialized to the browser
+	Reason       string  `json:"reason,omitempty"`
+	Amount       float64 `json:"amount,omitempty"` // the rejected bid, so a late rejection can't be mistaken for a newer bid's
 
 	// auction_ended
 	WinnerName string  `json:"winner_name,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"time"
 
 	"auction/backend/internal/config"
 	"auction/backend/internal/db"
@@ -34,6 +35,22 @@ func main() {
 
 	producer := kafkabus.NewProducer(cfg.KafkaBrokers, cfg.KafkaTopic)
 	defer producer.Close()
+
+	// Retried in the background: Kafka being briefly unreachable must not
+	// keep api-server from serving.
+	go func() {
+		for backoff := time.Second; ; backoff = min(backoff*2, 30*time.Second) {
+			actx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			err := kafkabus.EnsureBidExpiry(actx, cfg.KafkaBrokers, cfg.KafkaTopic, models.BidExpiry)
+			cancel()
+			if err == nil {
+				log.Printf("kafka: topic %s refuses bids older than %s", cfg.KafkaTopic, models.BidExpiry)
+				return
+			}
+			log.Printf("kafka: set bid expiry on topic %s (retrying in %s): %v", cfg.KafkaTopic, backoff, err)
+			time.Sleep(backoff)
+		}
+	}()
 
 	hub := ws.NewHub()
 	go hub.RelayEvents(ctx, rdb)

@@ -188,7 +188,7 @@ kubectl -n auction delete pod <ชื่อ pod จากคำสั่งบ�
 รัน `get pods` อีกครั้งจะเห็น pod ชื่อใหม่ที่ AGE ไม่กี่วินาที ถ้าเปิดหน้าประมูลค้างไว้ หน้าเว็บที่ต่ออยู่กับ pod
 ที่ถูกลบจะ reconnect เองภายในไม่กี่วินาที และราคายังถูกต้อง
 
-**TC-08 / TC-09 บน Kubernetes** (Node.js 22+):
+**TC-08 ถึง TC-11 บน Kubernetes** (Node.js 22+):
 ```bash
 cd loadtest
 ```
@@ -198,10 +198,25 @@ $env:TARGET="k8s"; node chaos/tc08_scaleout_fanout.mjs
 ```powershell
 $env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
 ```
+```powershell
+$env:TARGET="k8s"; node chaos/tc10_kafka_restart.mjs
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc11_postgres_outage.mjs
+```
 - TC-08: เพิ่ม `minReplicas` ของ HPA ขึ้น 1 ชั่วคราว → **HPA สร้าง pod ใหม่เอง** → ต่อเข้าแต่ละ pod ด้วย
   `kubectl port-forward` แล้วตรวจว่า pod ใหม่ได้ event ครบ → คืนค่า `minReplicas`
 - TC-09: **force-delete** api-server pod ที่เก่าที่สุด (ไม่มี graceful shutdown) → ตรวจว่า viewer ที่หลุด
   ต่อใหม่ได้ราคาล่าสุด และ Kubernetes สร้าง pod มาแทนเอง
+- TC-10 / TC-11: หยุด Kafka / Postgres ด้วย `kubectl scale statefulset kafka --replicas=0` (หรือ
+  `postgres`) ระหว่างที่มีคนบิดอยู่ แล้วเปิดกลับด้วย `--replicas=1` ข้อมูลอยู่ใน PVC จึงไม่หาย ลองเองก็ได้
+  ด้วยสองคำสั่งนี้ขณะเปิดหน้าประมูลไว้:
+  ```bash
+  kubectl -n auction scale statefulset postgres --replicas=0
+  ```
+  ```bash
+  kubectl -n auction scale statefulset postgres --replicas=1
+  ```
 
 **k6 test อื่นบน Kubernetes** — script ไหนใน `loadtest/k6` ก็รันใน cluster ได้:
 ```powershell
@@ -215,6 +230,8 @@ powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc03_stress_thro
 | TC-08 (pod ที่ HPA เพิ่ม) | 150/150 viewer บน 3 pod ได้ครบ, event เฉพาะคนรั่ว 0, latency p50 30ms / p95 38ms (ผ่าน port-forward) |
 | TC-09 (force-delete pod) | หลุด 33/101 connection (pod ที่ถูกลบมี 1 ใน 3), ต่อใหม่ได้ราคาล่าสุดครบ 33/33 ใน ~1.3 วินาที, บิดหลังจากนั้นถึงครบ 100/100, Kubernetes สร้าง pod แทนเอง |
 | HPA autoscale (300 VU, 2 นาที) | CPU 400%+ ของ request → **2 → 4 pod ภายใน ~5 วินาที → 6 pod** ภายใน ~1 นาที; โหลดหยุดแล้วลดกลับ 6 → 2 |
+| TC-10 (Kafka หยุด 10 วินาที) | บิดตอนล่มได้ `service_unavailable` 4/4, **ไม่มีตัวไหนถูกรับทีหลัง** (ก่อนแก้: 6 ตัว), บิดได้อีกครั้ง 18 วินาทีหลังเปิด Kafka (ก่อนแก้: 37 วินาที), Postgres 7/7 ไม่ซ้ำ, viewer 20/20 |
+| TC-11 (Postgres หยุด 15 วินาที) | บิดระหว่างล่มผ่าน 38/38 ช้าสุด **24ms** (ก่อนแก้: 1,865ms), `bids` 44/44 และ **`audit_log` 44/44** (ก่อนแก้: 5/35), Kafka lag 0 |
 
 **ปัญหาที่เจอจากการ scale จริง:** รอบแรกของ HPA load test มี request ล้มเหลว 0.22% (763 จาก 345,626)
 เป็น HTTP 500 ทั้งหมด เกิดหลัง HPA เพิ่มเป็น 6 pod — Postgres log ขึ้น `FATAL: sorry, too many clients

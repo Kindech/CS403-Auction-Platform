@@ -12,41 +12,105 @@ import (
 	"auction/backend/internal/redisstate"
 )
 
-// runLifecycle activates items whose start_time has arrived and finalizes
-// items whose (possibly anti-snipe-extended) end_time has passed. Running
-// this from the same goroutine that adjudicates bids means an item can
-// never be "finalized" out from under a bid that's concurrently updating
-// its Redis state - there is no concurrency between the two to race.
+// The auction lifecycle - activating items whose start_time has arrived and
+// finalizing items whose (possibly anti-snipe-extended) end_time has passed -
+// is split in two:
 //
-// It shares the adjudication goroutine, so every Postgres call is bounded
-// by lifecycleDBTimeout, and after a failure the next ticks are skipped with
-// exponential backoff - otherwise a down database would stall bidding for
-// the full timeout on every tick.
-func (w *Worker) runLifecycle(ctx context.Context) {
-	if time.Now().Before(w.lifecycleNextAt) {
-		return
-	}
-	ctx, cancel := context.WithTimeout(ctx, lifecycleDBTimeout)
-	defer cancel()
-	if w.lifecycleTick(ctx) {
-		w.lifecycleBackoff = 0
-		return
-	}
-	w.lifecycleBackoff = min(max(w.lifecycleBackoff*2, time.Second), 30*time.Second)
-	w.lifecycleNextAt = time.Now().Add(w.lifecycleBackoff)
-	log.Printf("worker: lifecycle tick failed, next attempt in %s", w.lifecycleBackoff)
-}
+//   - lifecycleLoop, its own goroutine, does the Postgres reads each tick and
+//     hands Run a lifecycleSnapshot. It used to run on the adjudication
+//     goroutine, where every tick's query stalled bidding for up to its
+//     timeout while Postgres was down (TC-11).
+//   - applyLifecycle runs on the adjudication goroutine and does everything
+//     that touches an item's Redis state. An item can therefore never be
+//     finalized out from under a bid that's concurrently updating its state -
+//     there is no concurrency between the two to race.
 
 const lifecycleDBTimeout = 2 * time.Second
 
-// lifecycleTick does one activate/finalize pass; false means Postgres failed.
-func (w *Worker) lifecycleTick(ctx context.Context) bool {
-	activated, err := db.ActivateDueItems(ctx, w.pool)
-	if err != nil {
-		log.Printf("worker: activate due items: %v", err)
-		return false
+// lifecycleSnapshot is one tick's view of Postgres.
+type lifecycleSnapshot struct {
+	activated []models.Item
+	live      []models.Item
+	// leading holds the leading bid of each live item that had no Redis
+	// state when the snapshot was read, for applyLifecycle to rebuild it.
+	leading map[string]leadingBid
+}
+
+type leadingBid struct {
+	bidderID, bidderName string
+	amount               float64
+	found                bool
+}
+
+// lifecycleLoop reads a snapshot every TickInterval and sends it to Run.
+// After a failure it backs off exponentially so a down database isn't
+// hammered (or the log flooded) once a second.
+func (w *Worker) lifecycleLoop(ctx context.Context, out chan<- lifecycleSnapshot) {
+	ticker := time.NewTicker(w.cfg.TickInterval)
+	defer ticker.Stop()
+	var backoff time.Duration
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		snap, err := w.readLifecycle(ctx)
+		if err != nil {
+			backoff = min(max(backoff*2, time.Second), 30*time.Second)
+			log.Printf("worker: lifecycle read failed, next attempt in %s: %v", backoff, err)
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return
+			}
+			continue
+		}
+		backoff = 0
+		select {
+		case out <- snap:
+		case <-ctx.Done():
+			return
+		}
 	}
-	for _, it := range activated {
+}
+
+func (w *Worker) readLifecycle(ctx context.Context) (lifecycleSnapshot, error) {
+	ctx, cancel := context.WithTimeout(ctx, lifecycleDBTimeout)
+	defer cancel()
+	var s lifecycleSnapshot
+	var err error
+	if s.activated, err = db.ActivateDueItems(ctx, w.pool); err != nil {
+		return s, fmt.Errorf("activate due items: %w", err)
+	}
+	if s.live, err = db.ListLiveItems(ctx, w.pool); err != nil {
+		return s, fmt.Errorf("list live items: %w", err)
+	}
+	s.leading = map[string]leadingBid{}
+	for _, it := range s.live {
+		if exists, err := redisstate.Exists(ctx, w.rdb, it.ID); err != nil || exists {
+			continue
+		}
+		var lb leadingBid
+		lb.bidderID, lb.bidderName, lb.amount, lb.found, err = db.GetLeadingBid(ctx, w.pool, it.ID)
+		if err != nil {
+			return s, fmt.Errorf("look up leading bid for item %s: %w", it.ID, err)
+		}
+		s.leading[it.ID] = lb
+	}
+	return s, nil
+}
+
+// applyLifecycle acts on a snapshot. Only finalizing writes to Postgres from
+// here, and only right after a snapshot proved Postgres reachable.
+func (w *Worker) applyLifecycle(ctx context.Context, s lifecycleSnapshot) {
+	for id, at := range w.finalized {
+		if time.Since(at) > time.Minute {
+			delete(w.finalized, id)
+		}
+	}
+
+	for _, it := range s.activated {
 		exists, _ := redisstate.Exists(ctx, w.rdb, it.ID)
 		if exists {
 			continue
@@ -60,13 +124,11 @@ func (w *Worker) lifecycleTick(ctx context.Context) bool {
 		log.Printf("worker: activated item %s", it.ID)
 	}
 
-	liveItems, err := db.ListLiveItems(ctx, w.pool)
-	if err != nil {
-		log.Printf("worker: list live items: %v", err)
-		return false
-	}
 	nowMs := time.Now().UnixMilli()
-	for _, it := range liveItems {
+	for _, it := range s.live {
+		if _, done := w.finalized[it.ID]; done {
+			continue // the snapshot was read before we finalized it
+		}
 		state, ok, err := redisstate.Get(ctx, w.rdb, it.ID)
 		if err != nil {
 			continue
@@ -78,19 +140,18 @@ func (w *Worker) lifecycleTick(ctx context.Context) bool {
 			// trail, not just the starting price: otherwise the item resets
 			// to its opening price and finalizes as "no bids" even though
 			// people bid on it.
+			lb, read := s.leading[it.ID]
+			if !read {
+				continue // it had state when the snapshot was read; look again next tick
+			}
 			state = models.AuctionState{
 				ItemID:       it.ID,
 				Price:        it.StartingPrice,
 				MinIncrement: it.BidIncrement,
 				EndTimeMs:    it.EndTime.UnixMilli(),
 			}
-			bidderID, bidderName, amount, found, err := db.GetLeadingBid(ctx, w.pool, it.ID)
-			if err != nil {
-				log.Printf("worker: look up leading bid for item %s: %v", it.ID, err)
-				continue // retry next tick rather than risk wiping out a real leader
-			}
-			if found {
-				state.Price, state.BidderID, state.BidderName = amount, bidderID, bidderName
+			if lb.found {
+				state.Price, state.BidderID, state.BidderName = lb.amount, lb.bidderID, lb.bidderName
 			}
 			if err := redisstate.Init(ctx, w.rdb, state); err != nil {
 				log.Printf("worker: backfill redis state for item %s: %v", it.ID, err)
@@ -101,9 +162,10 @@ func (w *Worker) lifecycleTick(ctx context.Context) bool {
 		if state.EndTimeMs > nowMs {
 			continue
 		}
-		w.finalizeItem(ctx, it.ID, state)
+		fctx, cancel := context.WithTimeout(ctx, lifecycleDBTimeout)
+		w.finalizeItem(fctx, it.ID, state)
+		cancel()
 	}
-	return true
 }
 
 func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.AuctionState) {
@@ -134,6 +196,7 @@ func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.A
 	w.logItemEnded(itemID, winnerID, state.BidderName, finalPrice)
 
 	_ = redisstate.Delete(ctx, w.rdb, itemID)
+	w.finalized[itemID] = time.Now()
 	log.Printf("worker: finalized item %s (winner=%s price=%v)", itemID, state.BidderName, finalPrice)
 }
 

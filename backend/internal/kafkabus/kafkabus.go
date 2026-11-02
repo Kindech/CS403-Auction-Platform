@@ -7,6 +7,7 @@ package kafkabus
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"time"
 
 	kafka "github.com/segmentio/kafka-go"
@@ -38,7 +39,40 @@ func (p *Producer) PublishBid(ctx context.Context, req models.BidRequest) error 
 	return p.writer.WriteMessages(ctx, kafka.Message{
 		Key:   []byte(req.ItemID),
 		Value: payload,
+		Time:  req.Timestamp, // what the broker's BidExpiry check measures from
 	})
+}
+
+// EnsureBidExpiry makes the broker refuse any bid that reaches it more than
+// maxAge after it was placed (record timestamp = BidRequest.Timestamp), via
+// the topic's message.timestamp.before.max.ms. kafka-go's Writer keeps
+// retrying a write after its caller gave up, so without this a bid whose
+// bidder was told "service_unavailable" could be appended - and win - once a
+// restarting broker came back. The broker's own clock decides, so a refused
+// write is never stored and bid-worker never sees it. Idempotent; called by
+// every api-server on startup so existing topics get it too.
+func EnsureBidExpiry(ctx context.Context, brokers []string, topic string, maxAge time.Duration) error {
+	client := &kafka.Client{Addr: kafka.TCP(brokers...)}
+	res, err := client.IncrementalAlterConfigs(ctx, &kafka.IncrementalAlterConfigsRequest{
+		Resources: []kafka.IncrementalAlterConfigsRequestResource{{
+			ResourceType: kafka.ResourceTypeTopic,
+			ResourceName: topic,
+			Configs: []kafka.IncrementalAlterConfigsRequestConfig{{
+				Name:            "message.timestamp.before.max.ms",
+				Value:           strconv.FormatInt(maxAge.Milliseconds(), 10),
+				ConfigOperation: kafka.ConfigOperationSet,
+			}},
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	for _, r := range res.Resources {
+		if r.Error != nil {
+			return r.Error
+		}
+	}
+	return nil
 }
 
 func (p *Producer) Close() error {
@@ -57,6 +91,13 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 			GroupID:  groupID,
 			MinBytes: 1,
 			MaxBytes: 10e6,
+			// After a broker restart (or a bid-worker that died without
+			// leaving the group) Kafka holds the partitions for the old
+			// member until its session expires - with the 30s default, no
+			// bid was adjudicated for ~25s after Kafka was back (TC-10).
+			// Heartbeats (every 3s) keep a live worker well inside this.
+			SessionTimeout:   10 * time.Second,
+			RebalanceTimeout: 10 * time.Second,
 		}),
 	}
 }
