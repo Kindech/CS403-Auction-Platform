@@ -40,9 +40,12 @@ spec:
       containers:
         - name: k6
           image: grafana/k6:2.1.0
-          args: ["run", "/scripts/$Script"]
+          # Also pushed to the in-cluster Prometheus, so the run shows up in
+          # Grafana's "k6 Load Test" and "Kubernetes Scaling" dashboards.
+          args: ["run", "-o", "experimental-prometheus-rw", "/scripts/$Script"]
           env:
             - { name: BASE_URL, value: "http://frontend:8080" }
+            - { name: K6_PROMETHEUS_RW_SERVER_URL, value: "http://prometheus:9090/api/v1/write" }
 $extraEnv          volumeMounts:
             - { name: scripts, mountPath: /scripts }
             - { name: lib, mountPath: /scripts/lib }

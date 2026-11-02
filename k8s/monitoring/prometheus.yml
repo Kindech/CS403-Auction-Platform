@@ -1,0 +1,44 @@
+# Prometheus on Kubernetes. Unlike deploy/prometheus/prometheus.yml, which
+# lists api-1/api-2 by name, this discovers pods through the Kubernetes API:
+# any pod in the namespace annotated prometheus.io/scrape: "true" is scraped
+# on its prometheus.io/port. A pod the HPA adds is scraped from its first
+# seconds and one it removes disappears, so count(up{job="api-server"})
+# is the live pod count.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: pods
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [auction]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      # One target per pod: init containers (busybox wait-for-deps) would
+      # otherwise each yield a port-less target of their own.
+      - source_labels: [__meta_kubernetes_pod_container_init]
+        action: drop
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_phase]
+        action: keep
+        regex: Running
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      # job = the app label, so queries read the same as on compose
+      # (job="api-server" / job="bid-worker").
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: job
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: service
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

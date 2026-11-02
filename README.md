@@ -221,6 +221,10 @@ dashboard 2 ชุดไว้ให้แล้ว ไม่ต้องตั�
 HTTP API ของ Prometheus ก่อนเชื่อ dashboard — เช่น p99 ของการตัดสินบิดได้ 0.78ms สอดคล้องกับ
 แนวคิด "ไม่มี disk I/O ใน fast path" ของสถาปัตยกรรม
 
+บน Kubernetes มี Prometheus และ Grafana ด้วย (port เดียวกัน) Prometheus ค้นหา pod เองแทนรายชื่อตายตัว
+และมี dashboard เพิ่มอีกตัว **Auction - Kubernetes Scaling** ที่แสดงจำนวน api-server pod คู่กับ CPU ที่ HPA
+ใช้ตัดสิน — ดู [`k8s/README.md`](k8s/README.md#prometheus--grafana)
+
 ## จัดการ database (pgAdmin)
 
 ระบบใช้ PostgreSQL ไม่ใช่ Microsoft SQL Server จึงใช้ SQL Server Management Studio ต่อไม่ได้
@@ -424,8 +428,8 @@ Deployment ที่ **HorizontalPodAutoscaler เพิ่ม/ลด pod เอ
 kubectl apply -k k8s
 ```
 
-วิธีติดตั้ง (build image, metrics-server) วิธีดู HPA scale สด, self-healing, การรัน TC-08 ถึง TC-11
-บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
+วิธีติดตั้ง (build image, metrics-server) วิธีดู HPA scale สด (ใน Grafana ที่ http://localhost:3000 หรือ
+`kubectl`), self-healing, การรัน TC-08 ถึง TC-11 บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
 
 ผลสำคัญ: ยิงโหลด 300 VU ต่อเนื่อง HPA เพิ่ม api-server จาก 2 → 6 pod แล้วลดกลับเมื่อโหลดหยุด
 และการ scale จริงเจอปัญหาที่ compose ไม่เคยเจอ — connection pool ของ 6 pod รวมกันเกิน

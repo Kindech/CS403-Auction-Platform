@@ -30,6 +30,20 @@ jobs:
       - name: go test
         run: go test ./... -v
 
+  dashboards:
+    name: Grafana dashboards in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # k8s/ keeps copies of the compose dashboards (kustomize can't read
+      # files outside k8s/); fail if one was edited without the other.
+      - name: compose and k8s dashboards are identical
+        run: |
+          for f in app-overview.json k6-load-test.json; do
+            diff -u "deploy/grafana/provisioning/dashboards/json/$f" "k8s/monitoring/dashboards/$f"
+          done
+
   frontend:
     name: Frontend (React + TypeScript)
     runs-on: ubuntu-latest

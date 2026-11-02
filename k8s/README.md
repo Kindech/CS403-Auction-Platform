@@ -11,7 +11,8 @@
 | `bid-worker.yaml` | Deployment 1 pod เสมอ (`strategy: Recreate` — ห้ามมี worker สองตัวพร้อมกัน) |
 | `frontend.yaml` + `nginx.conf` | nginx เสิร์ฟหน้าเว็บและ proxy ไป Service `api-server` เปิดเป็น LoadBalancer ที่ `localhost:8080` |
 | `config.yaml` | ConfigMap/Secret ของ backend (ค่า dev เหมือน compose — ห้ามใช้กับเครื่องที่เปิดสู่ภายนอก) |
-| `run-k6.ps1` | รัน k6 script เป็น Job **ภายใน cluster** |
+| `monitoring.yaml` + `monitoring/` | Prometheus (`localhost:9090`) และ Grafana (`localhost:3000`) พร้อม dashboard |
+| `run-k6.ps1` | รัน k6 script เป็น Job **ภายใน cluster** และส่ง metric เข้า Prometheus |
 
 ## ต่างจาก compose ตรงไหน
 
@@ -155,6 +156,9 @@ kubectl -n auction get pods,hpa
 compose (`seller@example.com` / `bidder@example.com`, รหัส `password123`) แต่เป็น database ใหม่แยกจาก
 compose
 
+Grafana อยู่ที่ **http://localhost:3000** (`admin` / `admin`) และ Prometheus ที่ **http://localhost:9090**
+(port เดียวกับ compose — จึงรันพร้อม compose ไม่ได้ เหมือน 8080)
+
 **หลังแก้โค้ด:** build image ใหม่ (ข้อ 3) แล้ว
 ```bash
 kubectl -n auction rollout restart deploy/api-server deploy/bid-worker deploy/frontend
@@ -165,9 +169,42 @@ kubectl -n auction rollout restart deploy/api-server deploy/bid-worker deploy/fr
 kubectl delete namespace auction
 ```
 
+## Prometheus + Grafana
+
+ต่างจาก compose ที่เขียนรายชื่อ `api-1:8080`, `api-2:8080` ไว้ใน `prometheus.yml` บน Kubernetes
+Prometheus **ค้นหา pod เองผ่าน Kubernetes API** (`kubernetes_sd_configs`, `monitoring/prometheus.yml`) —
+scrape ทุก pod ที่มี annotation `prometheus.io/scrape: "true"` ที่ port ใน `prometheus.io/port` (ใส่ไว้ที่
+api-server และ bid-worker) pod ที่ HPA เพิ่มมาจึงถูกเก็บ metric ตั้งแต่วินาทีแรก และหายไปเองตอนถูกลบ
+`count(up{job="api-server"} == 1)` จึงเป็นจำนวน pod ณ ตอนนั้น Prometheus ใช้ ServiceAccount ที่อ่าน pod
+ใน namespace นี้ได้อย่างเดียว
+
+Grafana มี 3 dashboard:
+
+| Dashboard | แสดงอะไร |
+|---|---|
+| **Auction - Kubernetes Scaling** (ใหม่) | จำนวน api-server pod เทียบ min/max ของ HPA, CPU ต่อ pod (% ของ request 100m) เทียบเส้นเป้า 50%, request/s และ WebSocket ต่อ pod, latency p95/p99, HTTP 5xx, จำนวน VU ของ k6 — ทุกอย่างบนแกนเวลาเดียวกัน |
+| Auction - Application Overview | เหมือน compose (บิดรับ/ปฏิเสธ, latency การตัดสินบิด ฯลฯ) |
+| Auction - k6 Load Test | เหมือน compose — `run-k6.ps1` ส่ง metric ของ k6 เข้า Prometheus ให้อัตโนมัติ |
+
+CPU ในกราฟมาจาก `process_cpu_seconds_total` ของแต่ละ pod ส่วน HPA ใช้ค่าจาก metrics-server ค่าใกล้เคียง
+กันแต่ไม่เท่ากันเป๊ะ (ช่วงเวลาที่เฉลี่ยต่างกัน) — ใช้ดูแนวโน้มว่าทำไม HPA ถึงเพิ่ม pod
+
+`monitoring/dashboards/app-overview.json` กับ `k6-load-test.json` เป็นสำเนาของไฟล์ใน
+`deploy/grafana/provisioning/dashboards/json/` (kustomize อ่านไฟล์นอกโฟลเดอร์ `k8s/` ไม่ได้) แก้ที่ไหน
+ต้องคัดลอกไปอีกที่ด้วย — CI job "Grafana dashboards in sync" จะ fail ถ้าสองชุดไม่ตรงกัน
+
 ## ทดสอบเอง
 
-**ดู HPA ทำงาน (autoscale):** เปิด PowerShell 2 หน้าต่าง หน้าต่างแรกดูสด:
+**ดู HPA ทำงานใน Grafana:** เปิด http://localhost:3000 → Dashboards → **Auction - Kubernetes Scaling**
+แล้วยิงโหลด:
+```powershell
+powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script hpa_autoscale_load.js
+```
+ภายในไม่กี่สิบวินาทีจะเห็นกราฟ VU ของ k6 ขึ้น → CPU เฉลี่ยทะลุเส้น 50% → จำนวน pod ขึ้นเป็นขั้น 2 → 4 → 6
+→ request กระจายไปทุก pod → พอโหลดหยุดจำนวน pod ค่อย ๆ ลดกลับเป็น 2 กราฟนี้เหมาะแคปใส่รายงาน (ตั้ง
+ช่วงเวลามุมขวาบนให้ครอบช่วงที่รัน)
+
+**ดู HPA ทำงานใน terminal:** เปิด PowerShell 2 หน้าต่าง หน้าต่างแรกดูสด:
 ```bash
 kubectl -n auction get hpa,pods -w
 ```
@@ -230,6 +267,7 @@ powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc03_stress_thro
 | TC-08 (pod ที่ HPA เพิ่ม) | 150/150 viewer บน 3 pod ได้ครบ, event เฉพาะคนรั่ว 0, latency p50 30ms / p95 38ms (ผ่าน port-forward) |
 | TC-09 (force-delete pod) | หลุด 33/101 connection (pod ที่ถูกลบมี 1 ใน 3), ต่อใหม่ได้ราคาล่าสุดครบ 33/33 ใน ~1.3 วินาที, บิดหลังจากนั้นถึงครบ 100/100, Kubernetes สร้าง pod แทนเอง |
 | HPA autoscale (300 VU, 2 นาที) | CPU 400%+ ของ request → **2 → 4 pod ภายใน ~5 วินาที → 6 pod** ภายใน ~1 นาที; โหลดหยุดแล้วลดกลับ 6 → 2 |
+| HPA autoscale + Grafana (รอบหลังย้าย monitoring มา) | 414,938 request **fail 0**, p95 209ms; Prometheus เห็น pod สูงสุด 6 และ k6 VU 300 บนแกนเวลาเดียวกับ CPU ต่อ pod |
 | TC-10 (Kafka หยุด 10 วินาที) | บิดตอนล่มได้ `service_unavailable` 4/4, **ไม่มีตัวไหนถูกรับทีหลัง** (ก่อนแก้: 6 ตัว), บิดได้อีกครั้ง 18 วินาทีหลังเปิด Kafka (ก่อนแก้: 37 วินาที), Postgres 7/7 ไม่ซ้ำ, viewer 20/20 |
 | TC-11 (Postgres หยุด 15 วินาที) | บิดระหว่างล่มผ่าน 38/38 ช้าสุด **24ms** (ก่อนแก้: 1,865ms), `bids` 44/44 และ **`audit_log` 44/44** (ก่อนแก้: 5/35), Kafka lag 0 |
 
@@ -246,6 +284,7 @@ already` เพราะแต่ละ pod เปิด connection pool ได�
   ถ้าต้อง scale ในอนาคต แนวทางคือให้ worker หลายตัวแบ่ง Kafka partition กัน (key = `item_id` จึงยังเรียงลำดับ
   ต่อ item ได้) แต่ lifecycle (เปิด/ปิดการประมูล) ต้องมี leader election ก่อน
 - Postgres, Redis, Kafka เป็นตัวเดียว (ไม่มี replica) เหมือน compose
-- Prometheus/Grafana/pgAdmin ยังไม่ได้ย้ายมา K8s — ใช้ `kubectl -n auction get hpa` / `kubectl top pods`
-  ดู CPU และจำนวน pod แทน
+- pgAdmin ยังไม่ได้ย้ายมา K8s — ดู database ด้วย `kubectl -n auction exec postgres-0 -- psql -U auction`
+- ยังไม่มี exporter ของ Postgres/Redis/Kafka (Grafana เห็นแค่ metric ของแอป) เช่นจำนวน connection
+  ของ Postgres ยังต้องดูด้วย `psql` (คำสั่งในหัวข้อ "Scale อะไรบ้าง")
 - TC-06 (`tc06_worker_crash_replay.sh`) ยังใช้ `docker compose` เท่านั้น

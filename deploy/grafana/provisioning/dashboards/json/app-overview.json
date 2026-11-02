@@ -11,7 +11,7 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "WebSocket Connections (active, both api-server instances)",
+      "title": "WebSocket Connections (active, all api-server instances)",
       "gridPos": { "x": 0, "y": 0, "w": 8, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "targets": [

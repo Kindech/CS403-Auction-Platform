@@ -16,8 +16,26 @@ resources:
   - api-server.yaml
   - bid-worker.yaml
   - frontend.yaml
+  - monitoring.yaml
 
 configMapGenerator:
   - name: nginx-conf
     files:
       - nginx.conf
+  - name: prometheus-config
+    files:
+      - monitoring/prometheus.yml
+  - name: grafana-datasources
+    files:
+      - monitoring/grafana-datasources.yml
+  - name: grafana-dashboard-providers
+    files:
+      - monitoring/grafana-dashboards.yml
+  # app-overview.json and k6-load-test.json are copies of the compose
+  # dashboards in deploy/grafana (kustomize can't read files outside k8s/);
+  # CI fails if they drift apart.
+  - name: grafana-dashboards
+    files:
+      - monitoring/dashboards/app-overview.json
+      - monitoring/dashboards/k6-load-test.json
+      - monitoring/dashboards/k8s-scaling.json

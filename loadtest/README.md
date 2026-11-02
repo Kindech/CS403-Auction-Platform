@@ -232,6 +232,9 @@ VUs, request rate, p99 duration และ check pass rate แบบสดระ�
 ให้ครอบช่วงที่รัน ตรวจสอบแล้วระหว่างพัฒนาด้วย TC-01 ที่ 200 VUs: `k6_vus_max`,
 `k6_ws_sessions_total` และ `k6_checks_rate` ใน Prometheus ตรงกับสรุปใน terminal ทุกค่า
 
+บน Kubernetes `k8s\run-k6.ps1` push metric ของ k6 เข้า Prometheus ใน cluster ให้อัตโนมัติ เปิด Grafana
+ที่ `http://localhost:3000` ได้เลย (ดู `k8s/README.md`)
+
 TC-08/TC-09 ไม่ได้ใช้ k6 จึงไม่ push เข้า Prometheus และรันแค่ไม่กี่วินาที ซึ่งสั้นกว่ารอบ scrape
 5 วินาที กราฟใน Grafana จึงแทบไม่เห็น ให้ดูผลจากที่สคริปต์พิมพ์ออกมาแทน (มี latency p50/p95 ให้แล้ว)
 TC-10/TC-11 ก็ไม่ได้ใช้ k6 เช่นกัน และพิมพ์เวลาตอบของทุกบิดออกมาให้แล้ว

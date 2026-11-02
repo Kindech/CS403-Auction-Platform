@@ -1,0 +1,153 @@
+{
+  "uid": "auction-k8s-scaling",
+  "title": "Auction - Kubernetes Scaling",
+  "description": "api-server pod count against the CPU the HPA scales on, and how load spreads over the pods. Run k8s/run-k6.ps1 -Script hpa_autoscale_load.js to see it move.",
+  "tags": ["auction", "kubernetes"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "api-server pods (scraped, ready)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "count(up{job=\"api-server\"} == 1)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Average CPU (% of request) - HPA target 50%",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "avg(rate(process_cpu_seconds_total{job=\"api-server\"}[30s])) / 0.1 * 100", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 50 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "WebSocket connections (all pods)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(auction_ws_connections_active{job=\"api-server\"})", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "HTTP 5xx / s (all pods)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(auction_http_requests_total{job=\"api-server\", status=~\"5..\"}[30s])) or vector(0)", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps", "decimals": 2,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area", "colorMode": "value" }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "api-server pods (HPA min 2 / max 6)",
+      "gridPos": { "x": 0, "y": 5, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "count(up{job=\"api-server\"} == 1)", "refId": "A", "legendFormat": "pods", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "vector(6)", "refId": "B", "legendFormat": "maxReplicas", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "vector(2)", "refId": "C", "legendFormat": "minReplicas", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": { "decimals": 0, "min": 0, "custom": { "lineInterpolation": "stepAfter", "fillOpacity": 10 } },
+        "overrides": [
+          { "matcher": { "id": "byRegexp", "options": "m..Replicas" }, "properties": [ { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [6, 6] } }, { "id": "custom.fillOpacity", "value": 0 }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "gray" } } ] }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "CPU per pod (% of its 100m request) - HPA adds pods when the average passes 50%",
+      "gridPos": { "x": 12, "y": 5, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "rate(process_cpu_seconds_total{job=\"api-server\"}[30s]) / 0.1 * 100", "refId": "A", "legendFormat": "{{pod}}", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "avg(rate(process_cpu_seconds_total{job=\"api-server\"}[30s])) / 0.1 * 100", "refId": "B", "legendFormat": "average", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "vector(50)", "refId": "C", "legendFormat": "HPA target", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0 },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "average" }, "properties": [ { "id": "custom.lineWidth", "value": 3 } ] },
+          { "matcher": { "id": "byName", "options": "HPA target" }, "properties": [ { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [6, 6] } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "HTTP requests / s per pod (Service spreads load over every ready pod)",
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum by (pod) (rate(auction_http_requests_total{job=\"api-server\"}[30s]))", "refId": "A", "legendFormat": "{{pod}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "WebSocket connections per pod",
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "auction_ws_connections_active{job=\"api-server\"}", "refId": "A", "legendFormat": "{{pod}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 0, "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "HTTP latency p95 / p99 (all pods, server-side)",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum(rate(auction_http_request_duration_seconds_bucket{job=\"api-server\"}[30s])) by (le))", "refId": "A", "legendFormat": "p95", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum(rate(auction_http_request_duration_seconds_bucket{job=\"api-server\"}[30s])) by (le))", "refId": "B", "legendFormat": "p99", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "k6 virtual users (runs started with k8s/run-k6.ps1)",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(k6_vus)", "refId": "A", "legendFormat": "VUs", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "decimals": 0, "min": 0 }, "overrides": [] }
+    }
+  ]
+}

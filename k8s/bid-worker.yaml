@@ -30,6 +30,9 @@ spec:
     metadata:
       labels:
         app: bid-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9101"
     spec:
       enableServiceLinks: false
       initContainers:

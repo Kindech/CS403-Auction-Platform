@@ -26,6 +26,9 @@ spec:
     metadata:
       labels:
         app: api-server
+      annotations:
+        prometheus.io/scrape: "true" # /metrics, found by k8s/monitoring/prometheus.yml
+        prometheus.io/port: "8080"
     spec:
       enableServiceLinks: false
       initContainers:
