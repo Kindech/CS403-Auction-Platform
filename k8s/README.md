@@ -26,6 +26,92 @@
   ของ Kafka จะเอาไปเป็น config ของ broker แล้วพัง
 - `initContainers` รอ postgres/redis/kafka พร้อมก่อน (แทน `depends_on` ของ compose)
 
+## Scale อะไรบ้าง
+
+**scale อัตโนมัติจริงมีแค่ api-server** ส่วนอื่นเป็นจำนวนตายตัว
+
+| Component | จำนวน pod | Scale |
+|---|---|---|
+| **api-server** | **2–6** ตาม CPU | ✅ HPA เพิ่ม/ลดเอง |
+| bid-worker | 1 (ทั้งระบบ ไม่ใช่ต่อสินค้า) | ❌ ตั้งใจให้มีตัวเดียว |
+| frontend (nginx) | 1 | ❌ ไม่มี state เพิ่ม replicas ได้ แต่ยังไม่จำเป็น |
+| Postgres / Redis / Kafka | 1 | ❌ ต้องทำเป็น cluster ซึ่งเกินขอบเขตของเครื่องเดียว |
+
+**ทำไม scale api-server:** เป็นส่วนที่ภาระโตตามจำนวนคนโดยตรง — ถือ WebSocket ของผู้ชมทุกคน, รับ REST ทั้งหมด
+และส่งราคาใหม่ไปหาผู้ชมทุกคน (คนดู 10,000 คน = หนึ่งบิดต้องส่ง 10,000 ข้อความ) ช่วงที่คนแห่บิดตอนใกล้ปิด
+(bid sniping) ส่วนนี้หนักก่อนส่วนอื่น
+
+**ทำไม bid-worker มีตัวเดียว:** pod เดียวอ่านครบทั้ง 6 partition และตัดสินบิดของทุกสินค้าทีละบิด ถ้ามีสองตัว
+ตัดสินสินค้าเดียวกันพร้อมกัน ทั้งคู่อาจเห็นราคาเก่าแล้วรับบิดทั้งสองอัน การตัดสินแต่ละบิดเป็นแค่คำสั่ง Redis
+ไม่กี่ตัว (การเขียน Postgres ทำแบบ batch แยก) ตัวเดียวจึงไม่เป็นคอขวด (TC-01 500 VU ผ่าน) — แนวทางถ้าต้อง
+scale อยู่ในหัวข้อข้อจำกัด
+
+### api-server มีกี่ตัว
+
+ไม่ตายตัว อยู่ระหว่าง `minReplicas: 2` ถึง `maxReplicas: 6` (ใน `api-server.yaml`)
+
+| สถานการณ์ | จำนวน api-server |
+|---|---|
+| ว่าง / คนน้อย (CPU เฉลี่ยต่ำกว่า 50% ของ request 100m) | **2** |
+| CPU เฉลี่ยเกิน 50% | เพิ่มได้ครั้งละ 2 pod ทุก 15 วินาที |
+| โหลดหนักมาก | **6** (เพดาน) |
+| โหลดลดลง | รอ 60 วินาทีให้แน่ใจ แล้วลดทีละ 1 pod ต่อ 30 วินาที จนเหลือ 2 |
+
+**ทำไมขั้นต่ำ 2 ไม่ใช่ 1:** ถ้าตัวหนึ่งตาย อีกตัวยังรับงานต่อระหว่างที่ Kubernetes สร้างตัวใหม่ (TC-09)
+และ HPA ใช้เวลาหลายวินาทีกว่าจะเพิ่ม pod (วัด CPU ทุก ~15 วินาที + pod ใหม่ต้อง start/ready) จึงต้องมี
+2 ตัวรับโหลดช่วงแรกไว้ก่อน
+
+**เพิ่มเพดานเกิน 6:** ต้องลด `POSTGRES_MAX_CONNS` ลงด้วย ไม่งั้นชนเพดาน connection ของ Postgres
+(ดูหัวข้อผลทดสอบ)
+
+### `POSTGRES_MAX_CONNS` ไม่ใช่จำนวน user ต่อ pod
+
+ค่านี้คือจำนวน connection **จาก api-server ไปหา Postgres** ไม่ใช่จำนวน user ที่ต่อเข้ามา
+
+```
+user หลายร้อยคน ──(HTTP / WebSocket)──► api-server pod ──(pool 10 เส้น)──► Postgres
+```
+
+| | user → api-server | api-server → Postgres |
+|---|---|---|
+| จำนวน | ไม่มีเพดานในโค้ด ขึ้นกับ CPU/RAM ของ pod | สูงสุด `POSTGRES_MAX_CONNS` (K8s 10, compose 20) |
+| ถือนานแค่ไหน | WebSocket ค้างตลอดที่เปิดหน้าเว็บ | ยืมแค่ช่วง query (ไม่กี่ ms) แล้วคืน |
+
+connection เส้นเดียวจึงรับได้หลายร้อย request ต่อวินาที และผู้ชมที่เปิดหน้าประมูลค้างไว้ไม่ใช้ Postgres เลย
+(ราคาใหม่มาทาง Redis Pub/Sub, การบิดผ่าน Kafka ไปให้ bid-worker เขียน DB) ตัวเลขจริง: HPA load test
+357,050 request บน 6 pod (pool 10) ไม่ fail เลย, TC-08/09 ถือ WebSocket 100–150 เส้นโดยไม่ใช้ connection
+DB เพิ่ม สิ่งที่จำกัดจำนวน user ต่อ pod จริง ๆ คือ CPU (request 100m, limit 500m) และ RAM (limit 256Mi)
+— ยังไม่ได้วัดว่า 1 pod รับ WebSocket ได้สูงสุดกี่เส้น
+
+### Kubernetes ช่วยเรื่องโหลดได้แค่ไหน
+
+- **ไม่มี K8s (compose):** api-server 2 ตัวตายตัว คนเข้ามาเยอะแค่ไหนก็มีแค่ 2 ตัวรับ
+- **มี K8s:** HPA เพิ่ม pod เมื่อ CPU เกินเป้า และลดกลับเมื่อว่าง + pod ตายแล้วสร้างใหม่เอง (ทุก component
+  ไม่ใช่แค่ api-server) + nginx ไม่ต้องรู้รายชื่อ server + rolling update ได้โดยไม่หยุดระบบ
+
+ข้อแม้ที่ควรรู้:
+1. **ทุก pod อยู่บนเครื่องเดียว** — เพิ่ม pod ไม่ได้เพิ่ม CPU จริง (แบ่ง CPU ก้อนเดิม) ช่วยได้แค่ใช้หลาย core
+   ได้เต็มขึ้น ความจุที่เพิ่มขึ้นจริงต้องมีหลาย node (เช่นบน cloud พร้อม cluster autoscaler) สิ่งที่การทดลองนี้
+   พิสูจน์คือ **กลไก scale ทำงานถูกต้อง** — pod เพิ่ม/ลดตามโหลด, pod ใหม่ได้ event ครบ, ไม่มี request fail
+2. **HPA ไม่ได้ scale ทันที** — ช่วงโหลดพุ่งกะทันหัน pod ที่มีอยู่ต้องรับไปก่อน
+3. **มีเพดาน** — เกิน 6 pod ก็กลับไปหนักเหมือนเดิม
+4. **scale ส่วนหนึ่ง ภาระไปตกที่ส่วนอื่น** — เจอจริงตอนเพิ่มเป็น 6 pod แล้ว Postgres connection ไม่พอ
+   ส่วนที่ไม่ได้ scale (Postgres, Redis, Kafka, bid-worker) ยังเป็นเพดานของทั้งระบบ
+
+**ทดสอบเอง:** ดูจำนวน api-server ตอนนี้ (ตอนว่างจะเป็น `cpu: 1%/50%` และ `REPLICAS 2`):
+```bash
+kubectl -n auction get hpa
+```
+ดูจำนวนเปลี่ยนแบบสด — เปิดคำสั่งนี้ค้างไว้ แล้วยิงโหลดตามหัวข้อ "ดู HPA ทำงาน" ด้านล่างในอีกหน้าต่าง:
+```bash
+kubectl -n auction get hpa,pods -w
+```
+ดูว่า connection ไป Postgres ไม่เพิ่มตามจำนวนผู้ชม (นับ connection ตอนว่าง แล้วนับใหม่ระหว่างเปิดหน้าประมูล
+หลายแท็บ — ตัวเลขแทบไม่เปลี่ยน):
+```bash
+kubectl -n auction exec postgres-0 -- psql -U auction -d auction -c "SELECT count(*) FROM pg_stat_activity WHERE datname='auction'"
+```
+
 ## วิธีรัน
 
 **1. เปิด Kubernetes:** Docker Desktop → Settings → Kubernetes → Enable Kubernetes (เลือก **kubeadm**)
