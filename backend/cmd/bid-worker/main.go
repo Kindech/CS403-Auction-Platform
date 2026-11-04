@@ -40,6 +40,9 @@ func main() {
 	consumer := kafkabus.NewConsumer(cfg.KafkaBrokers, cfg.KafkaTopic, cfg.KafkaGroupID)
 	defer consumer.Close()
 
+	producer := kafkabus.NewProducer(cfg.KafkaBrokers, cfg.KafkaTopic)
+	defer producer.Close()
+
 	notifier := worker.NewNotifier(rdb)
 
 	go func() {
@@ -52,7 +55,7 @@ func main() {
 		}
 	}()
 
-	w := worker.New(cfg, pool, rdb, consumer, notifier)
+	w := worker.New(cfg, pool, rdb, consumer, producer, notifier)
 	log.Printf("bid-worker started (group=%s topic=%s anti-snipe=%s/+%s events=redis:%s)",
 		cfg.KafkaGroupID, cfg.KafkaTopic, cfg.AntiSnipeWindow, cfg.AntiSnipeExtension, eventbus.Channel)
 	w.Run(ctx)

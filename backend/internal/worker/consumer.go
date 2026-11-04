@@ -24,16 +24,21 @@ type Worker struct {
 	pool     *pgxpool.Pool
 	rdb      *redis.Client
 	consumer *kafkabus.Consumer
+	producer *kafkabus.Producer // publishes item-close markers; see requestClose
 	notifier *Notifier
 
 	// finalized remembers items this worker just finalized, so a lifecycle
 	// snapshot read before that can't bring one back. Only touched by Run's
 	// goroutine.
 	finalized map[string]time.Time
+	// closeRequested is when each item's close marker was last published.
+	// Only touched by Run's goroutine.
+	closeRequested map[string]time.Time
 }
 
-func New(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, consumer *kafkabus.Consumer, notifier *Notifier) *Worker {
-	return &Worker{cfg: cfg, pool: pool, rdb: rdb, consumer: consumer, notifier: notifier, finalized: map[string]time.Time{}}
+func New(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, consumer *kafkabus.Consumer, producer *kafkabus.Producer, notifier *Notifier) *Worker {
+	return &Worker{cfg: cfg, pool: pool, rdb: rdb, consumer: consumer, producer: producer, notifier: notifier,
+		finalized: map[string]time.Time{}, closeRequested: map[string]time.Time{}}
 }
 
 type fetchResult struct {
@@ -103,6 +108,9 @@ func (w *Worker) Run(ctx context.Context) {
 		case res := <-msgCh:
 			if res.err != nil {
 				log.Printf("worker: skipping undecodable message at %s/%d@%d: %v", res.msg.Topic, res.msg.Partition, res.msg.Offset, res.err)
+				buffer = append(buffer, pendingInsert{msg: res.msg, skip: true})
+			} else if res.req.Kind == models.KindItemClose {
+				w.handleClose(ctx, res.req.ItemID)
 				buffer = append(buffer, pendingInsert{msg: res.msg, skip: true})
 			} else {
 				ins := w.handleBid(ctx, res.req)
@@ -214,8 +222,7 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 	state, ok, err := redisstate.Get(ctx, w.rdb, req.ItemID)
 	if err != nil {
 		log.Printf("worker: redis get failed for item %s: %v", req.ItemID, err)
-		metrics.BidsTotal.WithLabelValues("rejected", "internal_error").Inc()
-		return bidRecord(req, false, "internal_error")
+		return w.rejectUnavailable(req)
 	}
 	if !ok {
 		return reject("auction_not_live")
@@ -229,7 +236,10 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 	}
 
 	if err := redisstate.SetAccepted(ctx, w.rdb, out.NewState, req.RequestID); err != nil {
+		// Not stored means not accepted: announcing it would show a price the
+		// auction doesn't actually have.
 		log.Printf("worker: redis set failed for item %s: %v", req.ItemID, err)
+		return w.rejectUnavailable(req)
 	}
 
 	w.notifier.NotifyAll(notifyEvent{
@@ -262,6 +272,16 @@ func (w *Worker) handleBid(ctx context.Context, req models.BidRequest) db.BidIns
 	}
 
 	return bidRecord(req, true, "")
+}
+
+// rejectUnavailable records a bid that couldn't be decided because Redis
+// failed, and tells the bidder it wasn't recorded (best effort: the same outage
+// can stop this notification, which is why api-server also checks Redis before
+// accepting a bid).
+func (w *Worker) rejectUnavailable(req models.BidRequest) db.BidInsert {
+	w.notifier.NotifyAll(notifyEvent{Type: "bid_rejected", ItemID: req.ItemID, TargetUserID: req.UserID, Reason: "service_unavailable", Amount: req.Amount})
+	metrics.BidsTotal.WithLabelValues("rejected", "internal_error").Inc()
+	return bidRecord(req, false, "internal_error")
 }
 
 // bidRecord is the bids row for one decision, with its audit_log entry
@@ -299,13 +319,54 @@ func (w *Worker) flush(buffer []pendingInsert) bool {
 	writeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.BatchInsertBids(writeCtx, w.pool, inserts); err != nil {
-		log.Printf("worker: batch insert of %d bids failed, offsets NOT committed (will retry): %v", len(inserts), err)
-		return false
+		if !db.IsPermanent(err) {
+			log.Printf("worker: batch insert of %d bids failed, offsets NOT committed (will retry): %v", len(inserts), err)
+			return false
+		}
+		log.Printf("worker: batch of %d bids has a row Postgres will never accept, writing them one by one: %v", len(inserts), err)
+		if !w.insertIndividually(writeCtx, inserts) {
+			return false
+		}
 	}
 	if err := w.consumer.CommitOffset(writeCtx, msgs...); err != nil {
 		// Rows are durable; an uncommitted offset only means a replay, which
 		// the request_id conflict check turns into a no-op.
 		log.Printf("worker: commit offsets failed: %v", err)
+	}
+	return true
+}
+
+// insertIndividually rescues a batch containing a row Postgres will never
+// accept, e.g. a bid on an item someone deleted by hand. Retrying the batch
+// could never succeed: every later bid on every item would wait behind it
+// forever, even across worker restarts. The good rows are written and the bad
+// one goes to audit_log as bid.dropped. Returns false on a transient failure,
+// so the caller retries (rows already written are no-ops per request_id).
+func (w *Worker) insertIndividually(ctx context.Context, inserts []db.BidInsert) bool {
+	for _, ins := range inserts {
+		err := db.BatchInsertBids(ctx, w.pool, []db.BidInsert{ins})
+		if err == nil {
+			continue
+		}
+		if !db.IsPermanent(err) {
+			log.Printf("worker: write of bid %s failed, offsets NOT committed (will retry): %v", ins.RequestID, err)
+			return false
+		}
+		log.Printf("worker: dropping bid %s on item %s: %v", ins.RequestID, ins.ItemID, err)
+		details := fmt.Sprintf("request_id=%s user_id=%s amount=%.2f status=%s error=%v", ins.RequestID, ins.UserID, ins.Amount, ins.Status, err)
+		if err := db.LogAudit(ctx, w.pool, "", "bid.dropped", "item", ins.ItemID, details, ""); err != nil {
+			log.Printf("worker: record dropped bid %s failed (will retry): %v", ins.RequestID, err)
+			return false
+		}
+		metrics.BidsDroppedTotal.Inc()
+		if db.IsMissingItem(err) {
+			// Stops further bids being accepted for an item that is gone. A bid
+			// being adjudicated right now can recreate the key; its own failed
+			// write ends up back here and removes it again.
+			if err := redisstate.Delete(ctx, w.rdb, ins.ItemID); err != nil {
+				log.Printf("worker: remove redis state of deleted item %s: %v", ins.ItemID, err)
+			}
+		}
 	}
 	return true
 }

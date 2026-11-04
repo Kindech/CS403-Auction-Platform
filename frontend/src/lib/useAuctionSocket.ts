@@ -9,6 +9,7 @@ export interface LiveAuctionState {
   minIncrement: number | null;
   connected: boolean;
   lastRejectReason: string | null;
+  rejectCount: number; // bumps on every rejection, so a repeat of the same reason still shows
   ended: boolean;
   winnerName: string | null;
   finalPrice: number | null;
@@ -29,6 +30,7 @@ export function useAuctionSocket(itemID: string | undefined) {
     minIncrement: null,
     connected: false,
     lastRejectReason: null,
+    rejectCount: 0,
     ended: false,
     winnerName: null,
     finalPrice: null,
@@ -92,7 +94,7 @@ export function useAuctionSocket(itemID: string | undefined) {
                     : s.latestBid,
               };
             case "bid_rejected":
-              return { ...s, lastRejectReason: data.reason ?? "rejected" };
+              return { ...s, lastRejectReason: data.reason ?? "rejected", rejectCount: s.rejectCount + 1 };
             case "outbid":
               return {
                 ...s,
@@ -133,11 +135,12 @@ export function useAuctionSocket(itemID: string | undefined) {
     };
   }, [itemID]);
 
-  function sendBid(amount: number) {
+  /** Returns false if the socket isn't connected, i.e. the bid was not sent. */
+  function sendBid(amount: number): boolean {
     const ws = socketRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "bid", amount }));
-    }
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type: "bid", amount }));
+    return true;
   }
 
   return { state, sendBid };

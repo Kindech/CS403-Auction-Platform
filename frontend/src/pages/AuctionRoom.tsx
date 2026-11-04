@@ -5,6 +5,7 @@ import { useAuctionSocket } from "../lib/useAuctionSocket";
 import { useAuth } from "../lib/auth";
 import type { Bid, Item } from "../types";
 import { formatMoney, formatCountdown } from "../lib/format";
+import { isValidAmount, leadingBidId, minNextBid as nextBidFloor } from "../lib/bidding";
 import { WinnerAnnouncement } from "../components/WinnerAnnouncement";
 
 const REJECT_MESSAGES: Record<string, string> = {
@@ -14,8 +15,13 @@ const REJECT_MESSAGES: Record<string, string> = {
   rate_limited: "คุณเสนอราคาถี่เกินไป กรุณารอสักครู่แล้วลองใหม่",
   not_authenticated: "กรุณาเข้าสู่ระบบก่อนเสนอราคา",
   service_unavailable: "ระบบขัดข้องชั่วคราว การเสนอราคานี้ไม่ถูกบันทึก กรุณาลองใหม่อีกครั้ง",
-  invalid_amount: "จำนวนเงินที่เสนอไม่ถูกต้อง กรุณาระบุจำนวนเงินที่มากกว่า 0 และไม่เกิน 999,999,999,999.99",
+  invalid_amount: "จำนวนเงินที่เสนอไม่ถูกต้อง กรุณาระบุจำนวนเงินที่มากกว่า 0 ไม่เกิน 999,999,999,999.99 และมีทศนิยมไม่เกิน 2 ตำแหน่ง",
+  seller_cannot_bid: "ผู้ขายไม่สามารถเสนอราคาสินค้าของตัวเองได้",
 };
+
+function rejectMessage(reason: string): string {
+  return REJECT_MESSAGES[reason] ?? `การเสนอราคาถูกปฏิเสธ: ${reason}`;
+}
 
 export function AuctionRoom() {
   const { id } = useParams<{ id: string }>();
@@ -52,8 +58,10 @@ export function AuctionRoom() {
 
   useEffect(() => {
     if (!state.lastRejectReason) return;
-    setPopup(REJECT_MESSAGES[state.lastRejectReason] ?? `การเสนอราคาถูกปฏิเสธ: ${state.lastRejectReason}`);
-  }, [state.lastRejectReason]);
+    setPopup(rejectMessage(state.lastRejectReason));
+    // rejectCount: a second rejection for the same reason must show again.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.rejectCount]);
 
   useEffect(() => {
     if (!infoPopup) return;
@@ -176,20 +184,25 @@ export function AuctionRoom() {
 
   const currentPrice = state.price ?? item.current_price;
   const minIncrement = state.minIncrement ?? item.bid_increment;
-  const minNextBid = currentPrice + minIncrement;
+  const minNextBid = nextBidFloor(currentPrice, minIncrement, !!(state.bidderName ?? item.current_bidder));
   const endTimeMs = state.endTimeMs ?? new Date(item.end_time).getTime();
+  const isSeller = user?.id === item.seller_id;
+  const leaderId = leadingBidId(bids);
 
   function placeBid() {
     const value = Number(amount);
-    if (!Number.isFinite(value) || value <= 0) {
-      setPopup("กรุณาระบุจำนวนเงินที่ต้องการเสนอราคาให้ถูกต้อง");
+    if (!isValidAmount(value)) {
+      setPopup("กรุณาระบุจำนวนเงินให้ถูกต้อง: มากกว่า 0 ไม่เกิน 999,999,999,999.99 และมีทศนิยมไม่เกิน 2 ตำแหน่ง");
       return;
     }
     if (value < minNextBid) {
       setPopup(`ราคาที่เสนอต้องไม่ต่ำกว่าราคาขั้นต่ำในขณะนี้ คือ ${formatMoney(minNextBid)}`);
       return;
     }
-    sendBid(value);
+    if (!sendBid(value)) {
+      setPopup("ยังไม่ได้เชื่อมต่อกับระบบ การเสนอราคานี้ยังไม่ถูกส่ง กรุณารอสักครู่แล้วลองใหม่");
+      return; // keep the amount so they can just press the button again
+    }
     setAmount("");
   }
 
@@ -232,7 +245,9 @@ export function AuctionRoom() {
           <p className="text-[10px] uppercase tracking-wider text-ink-muted mb-1">สิ้นสุดประมูลใน</p>
           <p className="font-mono-digits text-xl font-bold text-gold-dark">{formatCountdown(endTimeMs, now)}</p>
 
-          {user ? (
+          {isSeller ? (
+            <p className="mt-6 text-sm text-ink-muted">คุณเป็นผู้ขายสินค้านี้ จึงเสนอราคาไม่ได้</p>
+          ) : user ? (
             <div className="mt-6 flex gap-2">
               <input
                 type="number"
@@ -254,7 +269,7 @@ export function AuctionRoom() {
             <p className="mt-6 text-sm text-ink-muted">เข้าสู่ระบบเพื่อเสนอราคา</p>
           )}
           {state.lastRejectReason && (
-            <p className="text-red-600 text-sm mt-3">ถูกปฏิเสธ: {state.lastRejectReason}</p>
+            <p className="text-red-600 text-sm mt-3">{rejectMessage(state.lastRejectReason)}</p>
           )}
         </div>
 
@@ -273,8 +288,12 @@ export function AuctionRoom() {
                 <tr key={b.id} className="border-t border-slate-100">
                   <td className="px-4 py-2.5">{b.user_name}</td>
                   <td className="px-4 py-2.5 font-mono-digits">{formatMoney(b.amount)}</td>
-                  <td className={`px-4 py-2.5 font-medium ${b.status === "accepted" ? "text-emerald-600" : "text-red-500"}`}>
-                    {b.status === "accepted" ? "สูงสุด" : "ถูกแซง/ปฏิเสธ"}
+                  <td
+                    className={`px-4 py-2.5 font-medium ${
+                      b.id === leaderId ? "text-emerald-600" : b.status === "accepted" ? "text-ink-muted" : "text-red-500"
+                    }`}
+                  >
+                    {b.id === leaderId ? "สูงสุด" : b.status === "accepted" ? "ถูกแซง" : "ถูกปฏิเสธ"}
                   </td>
                 </tr>
               ))}

@@ -140,7 +140,7 @@ docker build -f deploy/Dockerfile.frontend -t auction-frontend:dev .
 kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml
 ```
 ```bash
-kubectl -n kube-system patch deployment metrics-server --type=json -p "[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--kubelet-insecure-tls\"}]"
+kubectl -n kube-system patch deployment metrics-server --type=json --patch-file k8s/metrics-server-patch.json
 ```
 
 **5. Deploy:**
@@ -225,9 +225,12 @@ kubectl -n auction delete pod <ชื่อ pod จากคำสั่งบ�
 รัน `get pods` อีกครั้งจะเห็น pod ชื่อใหม่ที่ AGE ไม่กี่วินาที ถ้าเปิดหน้าประมูลค้างไว้ หน้าเว็บที่ต่ออยู่กับ pod
 ที่ถูกลบจะ reconnect เองภายในไม่กี่วินาที และราคายังถูกต้อง
 
-**TC-08 ถึง TC-11 บน Kubernetes** (Node.js 22+):
+**TC-06, TC-08 ถึง TC-14 บน Kubernetes** (Node.js 22+):
 ```bash
 cd loadtest
+```
+```powershell
+$env:TARGET="k8s"; bash chaos/tc06_worker_crash_replay.sh
 ```
 ```powershell
 $env:TARGET="k8s"; node chaos/tc08_scaleout_fanout.mjs
@@ -241,6 +244,19 @@ $env:TARGET="k8s"; node chaos/tc10_kafka_restart.mjs
 ```powershell
 $env:TARGET="k8s"; node chaos/tc11_postgres_outage.mjs
 ```
+```powershell
+$env:TARGET="k8s"; node chaos/tc12_redis_outage.mjs
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc13_close_with_backlog.mjs
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc14_deleted_item.mjs
+```
+- ทุกตัวจะรอให้ HPA กลับมาที่ขั้นต่ำก่อนเริ่ม (อาจนานถึง 2–3 นาทีหลัง load test) เพราะ pod ที่ถูกลดระหว่างทดสอบจะทำให้
+  viewer หลุด
+- TC-06: force-delete pod ของ `bid-worker` → Kubernetes สร้างตัวใหม่เอง → Kafka ส่งบิดที่ยังไม่ commit ซ้ำให้
+  ตัวใหม่ ตรวจว่า `bids` ครบไม่หาย
 - TC-08: เพิ่ม `minReplicas` ของ HPA ขึ้น 1 ชั่วคราว → **HPA สร้าง pod ใหม่เอง** → ต่อเข้าแต่ละ pod ด้วย
   `kubectl port-forward` แล้วตรวจว่า pod ใหม่ได้ event ครบ → คืนค่า `minReplicas`
 - TC-09: **force-delete** api-server pod ที่เก่าที่สุด (ไม่มี graceful shutdown) → ตรวจว่า viewer ที่หลุด
@@ -254,11 +270,14 @@ $env:TARGET="k8s"; node chaos/tc11_postgres_outage.mjs
   ```bash
   kubectl -n auction scale statefulset postgres --replicas=1
   ```
+- TC-12: หยุด Redis แบบเดียวกัน (`redis`) TC-13: หยุด `bid-worker` จนเลยเวลาปิดด้วย
+  `kubectl scale deployment bid-worker --replicas=0` TC-14: ลบสินค้าออกจาก Postgres ตรง ๆ
 
 **k6 test อื่นบน Kubernetes** — script ไหนใน `loadtest/k6` ก็รันใน cluster ได้:
 ```powershell
 powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc03_stress_throttling.js
 ```
+สคริปต์จะพิมพ์ `PASS`/`FAIL` ตอนจบและ exit 0/1 ตามผลของ k6
 
 ## ผลทดสอบระหว่างพัฒนา
 
@@ -270,6 +289,15 @@ powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc03_stress_thro
 | HPA autoscale + Grafana (รอบหลังย้าย monitoring มา) | 414,938 request **fail 0**, p95 209ms; Prometheus เห็น pod สูงสุด 6 และ k6 VU 300 บนแกนเวลาเดียวกับ CPU ต่อ pod |
 | TC-10 (Kafka หยุด 10 วินาที) | บิดตอนล่มได้ `service_unavailable` 4/4, **ไม่มีตัวไหนถูกรับทีหลัง** (ก่อนแก้: 6 ตัว), บิดได้อีกครั้ง 18 วินาทีหลังเปิด Kafka (ก่อนแก้: 37 วินาที), Postgres 7/7 ไม่ซ้ำ, viewer 20/20 |
 | TC-11 (Postgres หยุด 15 วินาที) | บิดระหว่างล่มผ่าน 38/38 ช้าสุด **24ms** (ก่อนแก้: 1,865ms), `bids` 44/44 และ **`audit_log` 44/44** (ก่อนแก้: 5/35), Kafka lag 0 |
+| TC-03 (2000 viewer) | connection สำเร็จ 9,574 ครั้ง **`ws_errors` 0** (ก่อนแก้ memory ของ nginx: 2,342) |
+| HPA autoscale (รอบล่าสุด) | 449,156 request **fail 0**, p95 191ms; CPU 500% ของ request → 2 → 4 → 6 pod แล้วลดกลับทีละ pod |
+| TC-12, TC-13, TC-14 | ผ่าน: Redis ล่มได้คำตอบทันที, บิดทันเวลาที่ค้างในคิวนับครบ 8/8, สินค้าถูกลบไม่กระทบสินค้าอื่น |
+| ทุก test บน Kubernetes | TC-01 ถึง TC-14 ผ่านครบ 14/14 |
+
+**ปัญหาที่เจอจาก TC-03 (2000 viewer):** WebSocket handshake ล้มเหลว 2–3% เพราะ nginx worker ถูก kernel kill
+(`worker process exited on signal 9`) จาก memory limit 128Mi ของ pod `frontend` — WebSocket ที่ proxy แต่ละเส้นถือ buffer
+ของ nginx และ `worker_processes auto` เปิด worker ตามจำนวน core ของ node แก้โดยเพิ่ม limit เป็น 512Mi และตั้ง 2 worker
+ปัญหานี้ไม่เคยโผล่ใน compose เพราะไม่ได้จำกัด memory
 
 **ปัญหาที่เจอจากการ scale จริง:** รอบแรกของ HPA load test มี request ล้มเหลว 0.22% (763 จาก 345,626)
 เป็น HTTP 500 ทั้งหมด เกิดหลัง HPA เพิ่มเป็น 6 pod — Postgres log ขึ้น `FATAL: sorry, too many clients
@@ -287,4 +315,3 @@ already` เพราะแต่ละ pod เปิด connection pool ได�
 - pgAdmin ยังไม่ได้ย้ายมา K8s — ดู database ด้วย `kubectl -n auction exec postgres-0 -- psql -U auction`
 - ยังไม่มี exporter ของ Postgres/Redis/Kafka (Grafana เห็นแค่ metric ของแอป) เช่นจำนวน connection
   ของ Postgres ยังต้องดูด้วย `psql` (คำสั่งในหัวข้อ "Scale อะไรบ้าง")
-- TC-06 (`tc06_worker_crash_replay.sh`) ยังใช้ `docker compose` เท่านั้น

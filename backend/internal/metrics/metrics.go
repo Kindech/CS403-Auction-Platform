@@ -42,6 +42,13 @@ var (
 		Help: "Total auctions finalized, by outcome (sold/unsold).",
 	}, []string{"outcome"})
 
+	// BidsDroppedTotal counts bids Postgres permanently refused (e.g. their
+	// item was deleted by hand); each one is in audit_log as bid.dropped.
+	BidsDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "auction_bids_dropped_total",
+		Help: "Total bids that could never be written to Postgres.",
+	})
+
 	// BidProcessingDuration times handleBid end-to-end (Redis read through
 	// notify), i.e. the "fast path" latency the report's NFRs are about.
 	BidProcessingDuration = promauto.NewHistogram(prometheus.HistogramOpts{

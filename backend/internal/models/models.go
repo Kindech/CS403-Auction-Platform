@@ -50,7 +50,7 @@ const (
 type Bid struct {
 	ID         string    `json:"id"`
 	ItemID     string    `json:"item_id"`
-	UserID     string    `json:"user_id"`
+	UserID     string    `json:"user_id,omitempty"` // blanked for other viewers: it would link a masked name across items
 	UserName   string    `json:"user_name,omitempty"`
 	ItemTitle  string    `json:"item_title,omitempty"`
 	Amount     float64   `json:"amount"`
@@ -59,8 +59,15 @@ type Bid struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// KindItemClose marks a Kafka message as an item's close marker rather than a
+// bid. bid-worker publishes it when an item is due to end; it comes back after
+// every bid queued ahead of it on the item's partition.
+const KindItemClose = "item_close"
+
 // BidRequest is the raw message an api-server produces onto Kafka.
 type BidRequest struct {
+	Kind string `json:"kind,omitempty"` // empty for a bid, or KindItemClose
+
 	// RequestID uniquely identifies this bid across Kafka re-deliveries, so
 	// replaying it can never write a second bids row.
 	RequestID string    `json:"request_id"`

@@ -18,12 +18,14 @@ func Decide(state models.AuctionState, bidderID, bidderName string, amount float
 		return Outcome{Accepted: false, Reason: "auction_closed", NewState: state}
 	}
 
-	minRequired := state.Price + state.MinIncrement
+	// In cents: as floats, 0.1 + 0.2 is more than 0.3 and a correct bid of
+	// exactly 0.3 would be rejected as too low.
+	minRequired := models.Cents(state.Price) + models.Cents(state.MinIncrement)
 	if state.BidderID == "" {
 		// no bids yet: the starting price itself is an acceptable opening bid
-		minRequired = state.Price
+		minRequired = models.Cents(state.Price)
 	}
-	if amount < minRequired {
+	if models.Cents(amount) < minRequired {
 		return Outcome{Accepted: false, Reason: "bid_too_low", NewState: state}
 	}
 
@@ -34,8 +36,9 @@ func Decide(state models.AuctionState, bidderID, bidderName string, amount float
 
 	extended := false
 	if state.EndTimeMs-bidTimeMs <= antiSnipeWindowMs {
-		newState.EndTimeMs = bidTimeMs + antiSnipeExtMs
-		extended = true
+		// max: a window longer than the extension must not shorten the auction
+		newState.EndTimeMs = max(state.EndTimeMs, bidTimeMs+antiSnipeExtMs)
+		extended = newState.EndTimeMs != state.EndTimeMs
 	}
 
 	return Outcome{Accepted: true, NewState: newState, SoftExtended: extended}

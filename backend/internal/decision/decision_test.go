@@ -17,6 +17,25 @@ func baseState() models.AuctionState {
 	}
 }
 
+func TestDecide_ComparesMoneyInCentsNotFloats(t *testing.T) {
+	s := baseState()
+	s.Price, s.MinIncrement = 0.1, 0.2 // 0.1 + 0.2 > 0.3 in float64
+	if out := Decide(s, "u2", "Bob", 0.3, 500_000, 60_000, 60_000); !out.Accepted {
+		t.Fatalf("exactly price + increment must be accepted, got %s", out.Reason)
+	}
+	if out := Decide(s, "u2", "Bob", 0.29, 500_000, 60_000, 60_000); out.Accepted {
+		t.Fatal("one cent under the minimum must be rejected")
+	}
+}
+
+func TestDecide_LongWindowNeverShortensTheAuction(t *testing.T) {
+	s := baseState()
+	out := Decide(s, "u2", "Bob", 110, s.EndTimeMs-100_000, 120_000, 60_000)
+	if !out.Accepted || out.NewState.EndTimeMs != s.EndTimeMs || out.SoftExtended {
+		t.Fatalf("end time moved from %d to %d (extended=%v)", s.EndTimeMs, out.NewState.EndTimeMs, out.SoftExtended)
+	}
+}
+
 func TestDecide_AcceptsHigherBid(t *testing.T) {
 	s := baseState()
 	out := Decide(s, "u2", "Bob", 110, 500_000, 60_000, 60_000)

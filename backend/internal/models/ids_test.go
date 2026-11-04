@@ -13,6 +13,10 @@ func TestValidBidAmount(t *testing.T) {
 		{110, true},
 		{0.01, true},
 		{MaxBidAmount, true},
+		{0.3, true},
+		{110.12, true},
+		{110.126, false}, // Postgres would store 110.13 while Redis keeps 110.126
+		{0.001, false},
 		{0, false},
 		{-5, false},
 		{MaxBidAmount + 1, false},

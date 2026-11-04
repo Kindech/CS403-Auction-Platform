@@ -21,7 +21,9 @@ func key(itemID string) string {
 }
 
 func New(addr string) *redis.Client {
-	return redis.NewClient(&redis.Options{Addr: addr})
+	// DialTimeout: the default 5s, times retries, stalls bid-worker's single
+	// loop for most of a minute per bid while Redis is down.
+	return redis.NewClient(&redis.Options{Addr: addr, DialTimeout: time.Second})
 }
 
 func Init(ctx context.Context, rdb *redis.Client, st models.AuctionState) error {

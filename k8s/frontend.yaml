@@ -35,8 +35,11 @@ spec:
           ports:
             - containerPort: 80
           resources:
-            requests: { cpu: 50m, memory: 32Mi }
-            limits: { memory: 128Mi }
+            # Every proxied WebSocket holds nginx buffers: at 128Mi the kernel
+            # killed nginx workers under TC-03's 2000 viewers (signal 9), each
+            # kill dropping that worker's connections.
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { memory: 512Mi }
           volumeMounts:
             # Replaces the compose nginx.conf baked into the image, which
             # names api-1/api-2 and Docker's DNS server.

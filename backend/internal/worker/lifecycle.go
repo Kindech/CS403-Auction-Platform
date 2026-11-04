@@ -24,6 +24,8 @@ import (
 //     that touches an item's Redis state. An item can therefore never be
 //     finalized out from under a bid that's concurrently updating its state -
 //     there is no concurrency between the two to race.
+//   - Finalizing happens when the item's close marker comes back through
+//     Kafka (requestClose/handleClose), after every bid queued ahead of it.
 
 const lifecycleDBTimeout = 2 * time.Second
 
@@ -109,6 +111,11 @@ func (w *Worker) applyLifecycle(ctx context.Context, s lifecycleSnapshot) {
 			delete(w.finalized, id)
 		}
 	}
+	for id, at := range w.closeRequested {
+		if time.Since(at) > time.Minute { // an item deleted by hand never closes
+			delete(w.closeRequested, id)
+		}
+	}
 
 	for _, it := range s.activated {
 		exists, _ := redisstate.Exists(ctx, w.rdb, it.ID)
@@ -159,13 +166,62 @@ func (w *Worker) applyLifecycle(ctx context.Context, s lifecycleSnapshot) {
 			}
 			log.Printf("worker: backfilled missing redis state for live item %s", it.ID)
 		}
-		if state.EndTimeMs > nowMs {
+		if !closeDue(state, nowMs) {
 			continue
 		}
-		fctx, cancel := context.WithTimeout(ctx, lifecycleDBTimeout)
-		w.finalizeItem(fctx, it.ID, state)
-		cancel()
+		w.requestClose(it.ID)
 	}
+}
+
+// closeDue reports whether an item can be finalized once every bid already in
+// Kafka has been decided. It waits BidExpiry past the end time because a bid
+// stamped just before the end can still be on its way to the broker for that
+// long; after that the broker refuses it, so nothing in time can land after
+// the close marker.
+func closeDue(state models.AuctionState, nowMs int64) bool {
+	return nowMs >= state.EndTimeMs+models.BidExpiry.Milliseconds()
+}
+
+// closeRetryInterval is how long to wait for a close marker to come back
+// through Kafka before publishing another.
+const closeRetryInterval = 5 * time.Second
+
+// requestClose publishes an item's close marker instead of finalizing it here.
+// The marker lands on the same partition as the item's bids, so it comes back
+// only after every earlier bid has been decided. Finalizing straight from the
+// lifecycle tick used to overtake any backlog (a worker restart, a rebalance, a
+// sniping burst): bids placed in time were then rejected as auction_not_live
+// and the item could end with no winner (TC-13).
+func (w *Worker) requestClose(itemID string) {
+	if at, ok := w.closeRequested[itemID]; ok && time.Since(at) < closeRetryInterval {
+		return
+	}
+	w.closeRequested[itemID] = time.Now()
+	go func() { // never hold up adjudication on Kafka
+		ctx, cancel := context.WithTimeout(context.Background(), closeRetryInterval)
+		defer cancel()
+		if err := w.producer.PublishItemClose(ctx, itemID); err != nil {
+			log.Printf("worker: publish close marker for item %s (will retry): %v", itemID, err)
+		}
+	}()
+}
+
+// handleClose runs when an item's close marker comes back through Kafka: every
+// bid before it has been decided, so the state is final unless one of those
+// bids extended the auction - then a later tick sends a new marker.
+func (w *Worker) handleClose(ctx context.Context, itemID string) {
+	delete(w.closeRequested, itemID)
+	state, ok, err := redisstate.Get(ctx, w.rdb, itemID)
+	if err != nil {
+		log.Printf("worker: read state to close item %s: %v", itemID, err)
+		return // the next tick publishes another marker
+	}
+	if !ok || !closeDue(state, time.Now().UnixMilli()) {
+		return // already finalized (a replayed marker), or extended
+	}
+	fctx, cancel := context.WithTimeout(ctx, lifecycleDBTimeout)
+	defer cancel()
+	w.finalizeItem(fctx, itemID, state)
 }
 
 func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.AuctionState) {
@@ -177,7 +233,16 @@ func (w *Worker) finalizeItem(ctx context.Context, itemID string, state models.A
 		winnerID, finalPrice = &id, &price
 	}
 
-	if err := db.FinalizeItem(ctx, w.pool, itemID, winnerID, finalPrice); err != nil {
+	err := db.FinalizeItem(ctx, w.pool, itemID, winnerID, finalPrice)
+	if db.IsPermanent(err) && winnerID != nil {
+		// The winner's account was deleted by hand: retrying would leave the
+		// item live forever, so it closes unsold instead.
+		log.Printf("worker: item %s can't record its winner %s, closing it unsold: %v", itemID, *winnerID, err)
+		winnerID, finalPrice = nil, nil
+		state.BidderName = ""
+		err = db.FinalizeItem(ctx, w.pool, itemID, nil, nil)
+	}
+	if err != nil {
 		log.Printf("worker: finalize item %s: %v", itemID, err)
 		return // retry on next tick rather than deleting redis state
 	}

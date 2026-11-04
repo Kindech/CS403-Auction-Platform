@@ -17,6 +17,7 @@ type Client struct {
 	ItemID      string
 	UserID      string
 	displayName string
+	isSeller    bool // this connection is the item's seller, who can't bid on it
 }
 
 // Hub fans WS traffic out to every client subscribed to an item's room.

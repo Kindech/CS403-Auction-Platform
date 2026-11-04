@@ -5,8 +5,9 @@
 # never lose an audit record - the replacement instance replays whatever
 # was still uncommitted).
 #
-# Usage: ./tc06_worker_crash_replay.sh
-# Requires: the compose stack already running (see ../../deploy), curl, node.
+# Usage: ./tc06_worker_crash_replay.sh              (docker compose)
+#        TARGET=k8s ./tc06_worker_crash_replay.sh   (Kubernetes, k8s/)
+# Requires: the stack already running, curl, node.
 set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://localhost:8080}"
@@ -49,17 +50,25 @@ echo "==> Firing 20 more bids and killing bid-worker mid-flight"
 node "$SCRIPT_DIR/send_bids.js" "$BIDDER_TOKEN" "$ITEM_ID" 20 2000 &
 SEND_PID=$!
 sleep 0.1
-(cd "$DEPLOY_DIR" && docker compose kill -s SIGKILL bid-worker) || true
+if [ "${TARGET:-}" = "k8s" ]; then
+  kubectl -n auction delete pod -l app=bid-worker --force --grace-period=0 || true
+else
+  (cd "$DEPLOY_DIR" && docker compose kill -s SIGKILL bid-worker) || true
+fi
 wait "$SEND_PID" || true
 
-echo "==> Restarting bid-worker (simulates Kubernetes self-healing / pod replacement)"
-(cd "$DEPLOY_DIR" && docker compose start bid-worker)
+if [ "${TARGET:-}" = "k8s" ]; then
+  echo "==> Kubernetes replaces the deleted bid-worker pod by itself"
+else
+  echo "==> Restarting bid-worker (simulates Kubernetes self-healing / pod replacement)"
+  (cd "$DEPLOY_DIR" && docker compose start bid-worker)
+fi
 
 echo "==> Polling audit log until it stabilizes at 30 rows (replay may take a few seconds)"
 EXPECTED=30
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
   COUNT=$(curl -s "$BASE_URL/api/items/$ITEM_ID/bids" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).length))")
-  echo "    [$i/30] current audit row count: $COUNT"
+  echo "    [$i/60] current audit row count: $COUNT"
   if [ "$COUNT" -eq "$EXPECTED" ]; then
     echo "PASS: all $EXPECTED bids were durably recorded despite the mid-flight worker crash (zero data loss)"
     exit 0

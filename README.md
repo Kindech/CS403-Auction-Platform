@@ -51,6 +51,16 @@ decoupled และ event-sequenced ออกแบบมาให้รับ t
 เขียนลง Postgres สำเร็จแล้วเท่านั้น ถ้า `bid-worker` ตายกลาง batch ข้อความเหล่านั้นจะถูกส่งซ้ำให้
 instance ที่มาแทน (รายงาน §2.6.4) ดู `loadtest/chaos/tc06_worker_crash_replay.sh`
 
+**ทำไมบิดทันเวลาไม่หาย แม้ worker ตามงานไม่ทัน:** พอถึงเวลาปิด `bid-worker` ไม่ได้ปิดประมูลเลย แต่จะรออีก
+2.5 วินาที (`models.BidExpiry` บิดที่ส่งทันเวลาไม่มีทางมาถึง Kafka ช้ากว่านี้) แล้วส่ง **close marker** เข้า
+Kafka partition เดียวกับบิดของสินค้านั้น แล้วปิดตอนอ่าน marker กลับมาได้ ซึ่งแปลว่าบิดทุกตัวที่เข้าคิวก่อนหน้าถูก
+ตัดสินครบแล้ว ถ้ามีบิดในคิวต่อเวลา (anti-snipe) marker จะไม่มีผล การประมูลจึงแสดงผู้ชนะหลังเวลาปิดประมาณ 3
+วินาที — ทดสอบด้วย TC-13
+
+**ถ้าบันทึกบิดลง Postgres ไม่ได้อย่างถาวร ระบบไม่ค้าง:** เช่นสินค้าถูกลบด้วยมือระหว่างที่ยังมีคนบิด `bid-worker`
+เขียนทีละแถวเพื่อแยกแถวที่มีปัญหาออก บันทึกลง `audit_log` เป็น `bid.dropped` แล้วทำงานต่อ ส่วนความล้มเหลว
+ชั่วคราว (Postgres ล่ม) ยัง retry จนสำเร็จเหมือนเดิม — ทดสอบด้วย TC-14
+
 **ถ้า Postgres ล่ม การบิดยังทำงาน:** การตัดสินบิดใช้แค่ Kafka + Redis ส่วน Postgres เป็นแค่บันทึก
 ถาวร `bid-worker` เขียนแถว `bids` พร้อม `audit_log` ของบิดนั้นใน statement เดียวผ่านคิวที่ retry
 จนสำเร็จ (`writeLoop`) และอ่าน Postgres สำหรับเปิด/ปิดประมูลใน goroutine แยก (`lifecycleLoop`)
@@ -63,6 +73,10 @@ TC-11
 (`models.BidExpiry` → topic config `message.timestamp.before.max.ms`, api-server ตั้งให้ตอน start)
 เพราะ Kafka client ยัง retry ข้อความเองต่อหลัง api-server เลิกรอ ถ้าไม่มีกฎนี้ บิดที่ผู้ใช้ถูกบอกว่า
 "ไม่ถูกบันทึก" จะเข้าระบบทีหลังตอน Kafka กลับมาได้ — ทดสอบด้วย TC-10
+
+**ถ้า Redis ล่ม ผู้ใช้ก็รู้ทันที:** `bid-worker` ต้องใช้ Redis ทั้งตัดสินบิดและแจ้งผล api-server จึงเช็ก Redis
+อยู่ตลอดทุก 0.5 วินาที (`Deps.WatchRedis`) และตอบ `service_unavailable` ทันทีโดยไม่ส่งบิดเข้า Kafka ช่วงแรก
+สุดประมาณ 2.5 วินาทีที่ยังตรวจไม่พบ บิดอาจไม่ได้คำตอบ — ทดสอบด้วย TC-12
 
 **ทำไมส่งผลการบิดผ่าน Redis Pub/Sub:** WebSocket ของแต่ละเบราว์เซอร์ค้างอยู่กับ api-server
 ตัวที่ nginx เลือกให้ บิดที่ผ่านทุกครั้งจึงต้องไปถึง api-server *ทุกตัว* `bid-worker` publish
@@ -81,8 +95,14 @@ TC-11
 
 **ชื่อถูกปิดบางส่วนแบบ eBay:** ชื่อผู้บิด/ผู้ชนะที่ออกไปทาง API response หรือ WS push จะผ่าน
 `models.MaskDisplayName` (`"Beer"` → `"B***r"`) สำหรับทุกคนยกเว้นเจ้าของชื่อ ใช้กับราคาสด
-ประวัติบิด รายการสินค้า และประกาศผู้ชนะ ข้อมูลใน database ไม่ถูกแก้ไข การปิดชื่อทำเฉพาะชั้น
-serialization ของ response ตาม request/ผู้รับแต่ละคน
+ประวัติบิด รายการสินค้า และประกาศผู้ชนะ และ `user_id`/`winner_id` จะไม่ถูกส่งให้คนอื่นด้วย ไม่งั้นใช้ ID
+ติดตามคนเดิมข้ามสินค้าได้ ข้อมูลใน database ไม่ถูกแก้ไข การปิดชื่อทำเฉพาะชั้น serialization ของ response
+ตาม request/ผู้รับแต่ละคน
+
+**ผู้ขายบิดสินค้าตัวเองไม่ได้:** api-server ปฏิเสธด้วย `seller_cannot_bid` (กันการปั่นราคา) และหน้าเว็บจะไม่แสดง
+ช่องเสนอราคาให้ผู้ขาย
+
+**จำนวนเงิน:** มีทศนิยมได้ไม่เกิน 2 ตำแหน่ง (เท่ากับที่ Postgres เก็บ) และเปรียบเทียบเป็นสตางค์ ไม่ใช่ float
 
 ## โครงสร้าง repo
 
@@ -126,9 +146,9 @@ port ของแต่ละ service ถ้าต้องการข้าม
 | nginx (frontend + API/WS proxy) | 8080 |
 | api-1 | 8081 |
 | api-2 | 8082 |
-| PostgreSQL | 5432 (`auction`/`auction`, db `auction`) |
-| Redis | 6379 |
-| Kafka | 9092 |
+| PostgreSQL | 5432 (`auction`/`auction`, db `auction`) — เฉพาะเครื่องนี้ (`127.0.0.1`) |
+| Redis | 6379 — เฉพาะเครื่องนี้ |
+| Kafka | 9092 — เฉพาะเครื่องนี้ |
 | pgAdmin | 5050 |
 | Prometheus | 9090 |
 | Grafana | 3000 |
@@ -144,7 +164,7 @@ port ของแต่ละ service ถ้าต้องการข้าม
 
 ทุกคำสั่งรันจากโฟลเดอร์ `deploy/` เตรียมก่อน: เปิด http://localhost:8080 ล็อกอินเป็น
 `seller@example.com` สร้างสินค้าที่เริ่มทันที เปิดหน้าสินค้านั้นค้างไว้ แล้วจด item ID จาก URL
-(`/auction/<item-id>`)
+(`/auctions/<item-id>`)
 
 **วิธีที่ 1 — ดูข้อความที่วิ่งใน channel:**
 ```bash
@@ -183,7 +203,7 @@ docker compose run -d --no-deps --name deploy-api-3 -p 8083:8080 api-1
 docker rm -f deploy-api-3
 ```
 
-ลบสินค้าทดสอบทิ้งหลังลองเสร็จ เพื่อไม่ให้ปนกับข้อมูล demo
+ลบสินค้าทดสอบทิ้งหลังลองเสร็จ เพื่อไม่ให้ปนกับข้อมูล demo (บิดที่ยังส่งเข้ามาหลังลบจะถูกบันทึกเป็น `bid.dropped`)
 
 ## Observability (Prometheus + Grafana)
 
@@ -212,6 +232,7 @@ dashboard 2 ชุดไว้ให้แล้ว ไม่ต้องตั�
 |---|---|---|
 | `auction_ws_connections_active` | gauge | WS connection ที่เปิดอยู่ ณ ตอนนี้ ต่อ instance |
 | `auction_bids_total{status,reason}` | counter | ผลการตัดสินบิดทุกครั้ง |
+| `auction_bids_dropped_total` | counter | บิดที่ Postgres ไม่มีวันรับ (เช่นสินค้าถูกลบ) ดูรายละเอียดใน `audit_log` |
 | `auction_bid_processing_duration_seconds` | histogram | latency ของ `handleBid` ตั้งแต่อ่าน Redis จนถึง publish ผล |
 | `auction_items_finalized_total{outcome}` | counter | การประมูลที่ปิดแล้ว `sold`/`unsold` |
 | `auction_http_requests_total{route,method,status}` | counter | REST request แยกตาม chi route pattern |
@@ -261,7 +282,8 @@ pgAdmin จำการเชื่อมต่อนี้ไว้ (เก็�
 `audit_log` (`backend/migrations/0002_audit_log.sql`) เป็น timeline เดียวที่เรียงตามเวลาของ
 ทั้งวงจรบัญชีและการประมูล — `user.register`, `user.login`, `user.login_failed`,
 `user.login_locked` (ดูเรื่อง lockout ด้านล่าง), `item.create`, `bid.accepted`, `bid.rejected`
-(เหตุผลอยู่ใน `details`) และ `item.ended` (ผู้ชนะและราคาสุดท้าย หรือ `"no bids"`) ส่วน `bids`
+(เหตุผลอยู่ใน `details`), `bid.dropped` (บันทึกลง `bids` ไม่ได้อย่างถาวร) และ `item.ended` (ผู้ชนะและราคาสุดท้าย
+หรือ `"no bids"`) คอลัมน์ `ip_address` เป็น IP ของผู้ใช้จาก header `X-Real-IP` ที่ nginx ตั้งให้ ส่วน `bids`
 ยังเป็น audit trail ต่อ item ตามที่รายงานกำหนด (§3.2.1) `audit_log` เป็นภาพรวมที่กว้างกว่า
 
 ### Migrations
@@ -297,12 +319,19 @@ Redis เปิด AOF persistence บน volume `redis-data` ถ้า live sta
 cd backend
 go vet ./...
 go build ./...
-go test ./... -v         # internal/decision + internal/models ไม่ต้องเปิด service ใด ๆ
+go test ./... -v         # ไม่ต้องเปิด service ใด ๆ (test ที่ต้องใช้ database จะ skip เอง)
 ```
 
 `internal/decision` เป็น pure function สำหรับตัดสินบิด (accept/reject, ขอบเขต anti-snipe,
-บิดเท่ากันพร้อมกัน) ส่วน `internal/models` มี `MaskDisplayName` — ทั้งสองไม่มี I/O test จึงรัน
-ทันทีและครอบคุณสมบัติความถูกต้องที่ส่วนอื่นของระบบพึ่งพา
+บิดเท่ากันพร้อมกัน, เปรียบเทียบเงินเป็นสตางค์) `internal/models` มี `MaskDisplayName` และกฎจำนวนเงิน
+`internal/httpapi` ตรวจ input ของ API และ `internal/ws` ตรวจ Origin ของ WebSocket — ไม่มี I/O test จึงรันทันที
+
+test ใน `internal/db` (lockout ภายใต้ request พร้อมกัน, การจำแนก error ของ batch insert) ต้องใช้ Postgres จริง
+ชี้ไปที่ database ที่เปิดอยู่ด้วย `TEST_POSTGRES_URL` (CI ทำให้เอง):
+
+```powershell
+$env:TEST_POSTGRES_URL="postgres://auction:auction@localhost:5432/auction?sslmode=disable"; go test ./internal/db -v
+```
 
 Environment variables หลัก (ดู `internal/config/config.go` สำหรับรายการเต็มและค่าเริ่มต้น และ
 `deploy/docker-compose.yml` ว่าต่อกันยังไง):
@@ -312,14 +341,15 @@ Environment variables หลัก (ดู `internal/config/config.go` สำห
 | `POSTGRES_URL`, `REDIS_ADDR`, `KAFKA_BROKERS` | ที่อยู่ของ service |
 | `POSTGRES_MAX_CONNS` | ขนาด connection pool ต่อ process (ค่าเริ่มต้น 20) — ผลรวมทุก instance ต้องไม่เกิน `max_connections` ของ Postgres |
 | `JWT_SECRET` | ต้องตรงกันทุก `api-*` instance |
+| `CORS_ORIGIN` | origin ที่อนุญาตสำหรับ REST และ WebSocket (ค่าเริ่มต้น `http://localhost:8080`) |
 | `BID_RATE_LIMIT_PER_SEC` | จำกัดจำนวนบิดต่อ WS connection (NFR ในรายงาน: 10/วินาที) |
 | `ANTI_SNIPE_WINDOW` / `ANTI_SNIPE_EXTENSION` | ช่วงเวลา soft-close และเวลาที่ต่อให้ |
 
 Login lockout (`maxFailedLoginAttempts` / `loginLockoutDuration` ใน
 `internal/httpapi/auth_handlers.go` ตั้งผ่าน env ไม่ได้) ล็อกบัญชี 15 นาทีหลังใส่รหัสผิด 5 ครั้งติด
 ระหว่างถูกล็อกแม้รหัสถูกก็ถูกปฏิเสธโดยไม่ตรวจเลย การเดารหัสจึงยืดเวลาล็อกไม่ได้
-`RegisterFailedLogin` นับและล็อกใน `UPDATE` เดียวแบบ atomic ความพยายามที่เข้ามาพร้อมกันจึงหลุด
-เกณฑ์ไม่ได้
+`ClaimLoginAttempt` นับและล็อกใน `UPDATE` เดียว**ก่อน**ตรวจรหัส ส่ง request มาพร้อมกันกี่ตัวก็ตรวจรหัสได้ไม่เกิน 5
+ครั้ง (รหัสถูกจะล้างตัวนับ) — พิสูจน์ด้วย test ที่ยิงพร้อมกัน 40 ตัวใน `internal/db`
 
 ## พัฒนา Frontend
 
@@ -327,6 +357,8 @@ Login lockout (`maxFailedLoginAttempts` / `loginLockoutDuration` ใน
 cd frontend
 npm install
 npm run dev   # proxy /api และ /ws ไปที่ http://localhost:8080 — ต้องรัน api-1 ไว้ หรือชี้ไปที่ nginx ของ compose
+npm run lint
+npm test      # กฎราคาขั้นต่ำ, จำนวนเงิน, บิดที่นำอยู่ (src/lib/bidding.test.ts)
 ```
 
 หน้าเว็บครบทุกหน้าจอตามรายงาน §3.6: สมัคร/ล็อกอิน, dashboard (รายการ live/upcoming/ended พร้อม
@@ -339,10 +371,11 @@ npm run dev   # proxy /api และ /ws ไปที่ http://localhost:8080 �
 
 ## ทดสอบ Load & ความถูกต้อง
 
-`loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 7 test เพื่อพิสูจน์สิ่งที่รายงาน
+`loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 10 test เพื่อพิสูจน์สิ่งที่รายงาน
 กล่าวไว้ในส่วนอื่นแต่ตารางไม่มี scenario (TC-05 soft-close extension, TC-06 worker crash/replay,
 TC-07 reconnect resync, TC-08 scale-out fan-out, TC-09 api-server failover, TC-10 Kafka restart,
-TC-11 Postgres outage) รายละเอียดแต่ละตัว และวิธีอ่านผลอยู่ใน `loadtest/README.md`
+TC-11 Postgres outage, TC-12 Redis outage, TC-13 ปิดประมูลตอนมีบิดค้างในคิว, TC-14 สินค้าถูกลบกลางการประมูล)
+รายละเอียดแต่ละตัว และวิธีอ่านผลอยู่ใน `loadtest/README.md`
 
 ทดสอบการ scale และ failover ของ api-server ได้เองด้วยคำสั่งเดียว (Node.js 22+, เปิด stack ไว้แล้ว):
 
@@ -360,6 +393,9 @@ node chaos/tc09_api_failover.mjs      # kill api-1 กลางการปร�
 cd loadtest
 node chaos/tc10_kafka_restart.mjs     # หยุด Kafka 10 วินาที: ทุกบิดได้คำตอบ, "ระบบขัดข้อง" = ไม่ถูกบันทึกจริง
 node chaos/tc11_postgres_outage.mjs   # หยุด Postgres 15 วินาที: บิดยัง real-time, bids/audit_log ครบหลังกลับมา
+node chaos/tc12_redis_outage.mjs      # หยุด Redis 10 วินาที: บิดได้คำตอบ "ระบบขัดข้อง" ทันที, กลับมาบิดได้เอง
+node chaos/tc13_close_with_backlog.mjs # หยุด bid-worker จนเลยเวลาปิด: บิดที่ส่งทันเวลาต้องนับทุกตัว
+node chaos/tc14_deleted_item.mjs      # ลบสินค้าที่กำลังประมูล: บิดของสินค้าอื่นยังบันทึกได้ปกติ
 ```
 
 ทั้งสองตัวพิมพ์ผลของทุกบิด (`[down] bid 150 -> accepted in 16ms` เป็นต้น) ให้เห็นว่าระหว่างล่มเกิดอะไรขึ้น
@@ -406,16 +442,21 @@ port-forwarding ของ Docker Desktop สะสม connection state ที่
 
 ## Continuous Integration
 
-`.github/workflows/ci.yml` รันทุกครั้งที่ push/PR ทุก branch มี 2 job ทำงานขนานกัน:
+`.github/workflows/ci.yml` รันทุกครั้งที่ push/PR ทุก branch มี 3 job ทำงานขนานกัน:
 
 | Job | ขั้นตอน |
 |---|---|
-| Backend | `go vet ./...` → `go build ./...` → `go test ./... -v` |
-| Frontend | `npm ci` → `npm run build` (`tsc -b` ตรวจ type แล้ว `vite build`) |
+| Backend | `go vet ./...` → `go build ./...` → `go test ./... -v` (มี Postgres ให้ test ใน `internal/db`) |
+| Grafana dashboards in sync | dashboard ของ compose กับ `k8s/` ต้องตรงกัน |
+| Frontend | `npm ci` → `npm run lint` → `npm test` → `npm run build` (`tsc -b` ตรวจ type แล้ว `vite build`) |
 
-ไม่ต้องเปิด service จริง ทั้งสอง job รันกับ checkout เปล่า ๆ ตรงกับวิธีที่ `internal/decision`/
-`internal/models` และ frontend build ถูกออกแบบให้ตรวจ ดูประวัติการรันได้ที่แท็บ **Actions** บน
+load test กับ chaos test ใน `loadtest/` ไม่ได้อยู่ใน CI เพราะต้องเปิดทั้งระบบ ดูประวัติการรันได้ที่แท็บ **Actions** บน
 GitHub ส่วน badge ด้านบนไฟล์นี้แสดงผลรอบล่าสุดของ branch ที่ GitHub เลือกเป็นค่าเริ่มต้น
+
+## ค่าเริ่มต้นที่ใช้ได้เฉพาะในเครื่อง
+
+ระบบนี้ตั้งค่ามาให้รันบนเครื่องตัวเอง ก่อนเปิดให้เครื่องอื่นเข้าถึงต้องเปลี่ยน: `JWT_SECRET` (api-server จะเตือนใน
+log ถ้ายังเป็นค่าเริ่มต้น), รหัสผ่าน Postgres/Grafana/pgAdmin และ `CORS_ORIGIN`
 
 ## Kubernetes (local)
 

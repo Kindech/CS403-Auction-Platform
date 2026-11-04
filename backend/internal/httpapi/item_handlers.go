@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -50,12 +51,13 @@ func (s *Server) handleGetItem(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateItem(w http.ResponseWriter, r *http.Request) {
 	claims, _ := claimsFrom(r)
 	var req createItemRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	if req.Title == "" || req.StartingPrice <= 0 || req.BidIncrement <= 0 || !req.EndTime.After(req.StartTime) {
-		writeError(w, http.StatusBadRequest, "title, starting_price, bid_increment and a valid start/end window are required")
+	req.Title = strings.TrimSpace(req.Title)
+	if msg := validateItem(req, time.Now()); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -111,6 +113,7 @@ func (s *Server) handleItemBids(w http.ResponseWriter, r *http.Request) {
 	for i := range bids {
 		if bids[i].UserID != viewerID {
 			bids[i].UserName = models.MaskDisplayName(bids[i].UserName)
+			bids[i].UserID = "" // a stable ID would link the masked name across items
 		}
 	}
 	writeJSON(w, http.StatusOK, bids)

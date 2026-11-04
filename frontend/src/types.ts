@@ -32,7 +32,7 @@ export interface Bid {
   id: string;
   item_id: string;
   item_title?: string;
-  user_id: string;
+  user_id?: string; // only sent to the bidder themselves
   user_name?: string;
   amount: number;
   status: BidStatus;

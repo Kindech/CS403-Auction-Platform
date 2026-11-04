@@ -1,0 +1,10 @@
+# The build context is the repo root. Without this, COPY frontend/ copies the
+# host's node_modules (Windows binaries) over the one npm just installed in the
+# image, and every build sends all of it to the Docker daemon.
+.git
+**/node_modules
+frontend/dist
+**/*.tsbuildinfo
+loadtest
+k8s
+**/*.md

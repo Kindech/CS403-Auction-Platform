@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"auction/backend/internal/config"
@@ -18,7 +21,11 @@ import (
 
 func main() {
 	cfg := config.Load()
-	ctx := context.Background()
+	if cfg.JWTSecret == config.DefaultJWTSecret {
+		log.Printf("WARNING: JWT_SECRET is the built-in dev value - set your own before exposing this anywhere")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	pool, err := db.Connect(ctx, cfg.PostgresURL, cfg.PostgresMaxConns)
 	if err != nil {
@@ -39,7 +46,7 @@ func main() {
 	// Retried in the background: Kafka being briefly unreachable must not
 	// keep api-server from serving.
 	go func() {
-		for backoff := time.Second; ; backoff = min(backoff*2, 30*time.Second) {
+		for backoff := time.Second; ctx.Err() == nil; backoff = min(backoff*2, 30*time.Second) {
 			actx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			err := kafkabus.EnsureBidExpiry(actx, cfg.KafkaBrokers, cfg.KafkaTopic, models.BidExpiry)
 			cancel()
@@ -64,12 +71,33 @@ func main() {
 			return db.GetItem(ctx, pool, itemID)
 		},
 		RateLimitPerSec: cfg.BidRateLimitPerSec,
+		AllowedOrigin:   cfg.CORSOrigin,
+	}
+	go wsDeps.WatchRedis(ctx)
+
+	server := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           httpapi.NewServer(cfg, pool, rdb, wsDeps).Router(),
+		ReadHeaderTimeout: 10 * time.Second, // a client can't hold a connection by sending headers slowly
+		IdleTimeout:       2 * time.Minute,
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ListenAndServe() }()
+	log.Printf("api-server listening on %s (rate limit %d bids/sec/conn)", cfg.HTTPAddr, cfg.BidRateLimitPerSec)
+
+	select {
+	case err := <-serveErr:
+		log.Fatalf("http server: %v", err)
+	case <-ctx.Done():
 	}
 
-	server := httpapi.NewServer(cfg, pool, rdb, wsDeps)
-
-	log.Printf("api-server listening on %s (rate limit %d bids/sec/conn)", cfg.HTTPAddr, cfg.BidRateLimitPerSec)
-	if err := http.ListenAndServe(cfg.HTTPAddr, server.Router()); err != nil {
-		log.Fatalf("http server: %v", err)
+	// Let in-flight REST requests finish (a rolling update or scale-down sends
+	// SIGTERM). WebSockets end with the process and their browsers reconnect
+	// to another instance.
+	log.Println("api-server shutting down")
+	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(sctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("http server shutdown: %v", err)
 	}
 }

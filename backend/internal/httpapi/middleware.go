@@ -51,6 +51,31 @@ func (s *Server) optionalUserID(r *http.Request) string {
 	return claims.UserID
 }
 
+// realIPFromProxy makes r.RemoteAddr the browser's address instead of nginx's,
+// so audit_log records who actually connected. Only X-Real-IP is used because
+// that is the header nginx overwrites; chi's middleware.RealIP also believes
+// True-Client-IP, which a client could send through nginx untouched.
+func realIPFromProxy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ip := r.Header.Get("X-Real-IP"); ip != "" {
+			r.RemoteAddr = ip
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// redactTokenFromLogs keeps the WebSocket's ?token=<JWT> out of the access log,
+// which prints r.RequestURI: anyone reading the logs could otherwise log in as
+// that user. Handlers read r.URL, which keeps the token.
+func redactTokenFromLogs(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Has("token") {
+			r.RequestURI = r.URL.Path
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func corsMiddleware(origin string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

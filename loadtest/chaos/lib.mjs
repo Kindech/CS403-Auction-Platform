@@ -38,6 +38,23 @@ export function portForward(pod, localPort) {
   });
 }
 
+// settleHpa waits for the HPA to be back at its minimum. A scale-down left over
+// from an earlier test's load would otherwise remove a pod mid-test, dropping
+// that pod's viewers while the test is counting what they received.
+async function settleHpa() {
+  const deadline = Date.now() + 240000;
+  let announced = false;
+  while (Date.now() < deadline) {
+    const [current, desired, min] = kubectl("get", "hpa", "api-server", "-o",
+      "jsonpath={.status.currentReplicas} {.status.desiredReplicas} {.spec.minReplicas}").trim().split(" ").map(Number);
+    if (current === min && desired === min) return;
+    if (!announced) { console.log(`==> Waiting for the HPA to settle (${current} api-server pods, minimum ${min})`); announced = true; }
+    await sleep(3000);
+  }
+  console.log("    (HPA did not settle in time, continuing)");
+}
+if (K8S) await settleHpa();
+
 // compose runs `docker compose -f deploy/docker-compose.yml ...args` without a
 // shell, so SQL and JSON arguments need no quoting.
 export function compose(...args) {
@@ -74,6 +91,18 @@ export function startService(name) {
   if (process.env.START_CMD) return runCmd(process.env.START_CMD);
   if (!K8S) return compose("start", name);
   kubectl("scale", "statefulset", name, "--replicas=1");
+}
+
+// stopWorker / startWorker take bid-worker down and bring it back: a Deployment
+// on Kubernetes, unlike the StatefulSets above.
+export function stopWorker() {
+  if (!K8S) return compose("stop", "bid-worker");
+  kubectl("scale", "deployment", "bid-worker", "--replicas=0");
+  try { kubectl("wait", "--for=delete", "pod", "-l", "app=bid-worker", "--timeout=60s"); } catch { /* already gone */ }
+}
+export function startWorker() {
+  if (!K8S) return compose("start", "bid-worker");
+  kubectl("scale", "deployment", "bid-worker", "--replicas=1");
 }
 
 // kafkaLag is how many bid-requests messages bid-worker has not committed
@@ -202,9 +231,9 @@ export function percentile(values, p) {
 
 // cleanup deletes everything a test created, in foreign-key order. It first
 // waits until bid-worker has flushed all expectedBids rows for the item:
-// deleting the item while a batch is still in flight would make that batch's
-// INSERT fail on the foreign key, and bid-worker retries a failed batch
-// until it succeeds - stalling every later write.
+// deleting the item while a batch is still in flight would make bid-worker drop
+// those rows (see TC-14), and their bid.dropped audit entries would be left
+// behind.
 export async function cleanup({ itemId, userIds = [], expectedBids = 0 }) {
   if (itemId && expectedBids > 0) {
     await waitFor(() => Number(psql(`SELECT count(*) FROM bids WHERE item_id='${itemId}'`)) >= expectedBids, 15000, "bid rows to be flushed")

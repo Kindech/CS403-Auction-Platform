@@ -39,14 +39,14 @@ type userPayload struct {
 
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
-	if req.Email == "" || len(req.Password) < 6 || req.DisplayName == "" {
-		writeError(w, http.StatusBadRequest, "email, display_name and password (min 6 chars) are required")
+	if msg := validateRegistration(req); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -57,8 +57,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u, err := db.CreateUser(r.Context(), s.pool, req.Email, hash, req.DisplayName)
-	if err != nil {
+	if db.IsUniqueViolation(err) {
 		writeError(w, http.StatusConflict, "email already registered")
+		return
+	}
+	if err != nil {
+		log.Printf("httpapi: create user: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not create account")
 		return
 	}
 	_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.register", "user", u.ID, u.Email, r.RemoteAddr)
@@ -78,7 +83,7 @@ type loginRequest struct {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
@@ -95,17 +100,19 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if u.LockedUntil != nil && u.LockedUntil.After(time.Now()) {
+	allowed, justLocked, err := db.ClaimLoginAttempt(r.Context(), s.pool, u.ID, maxFailedLoginAttempts, loginLockoutDuration)
+	if err != nil {
+		log.Printf("httpapi: claim login attempt for %s: %v", u.ID, err)
+		writeError(w, http.StatusInternalServerError, "login failed")
+		return
+	}
+	if !allowed {
 		_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login_locked", "user", u.ID, "", r.RemoteAddr)
 		writeError(w, http.StatusTooManyRequests, "too many failed attempts - account is temporarily locked, try again later")
 		return
 	}
 
 	if !auth.CheckPassword(u.PasswordHash, req.Password) {
-		justLocked, lockErr := db.RegisterFailedLogin(r.Context(), s.pool, u.ID, maxFailedLoginAttempts, loginLockoutDuration)
-		if lockErr != nil {
-			log.Printf("httpapi: register failed login for %s: %v", u.ID, lockErr)
-		}
 		_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login_failed", "user", u.ID, "", r.RemoteAddr)
 		if justLocked {
 			_ = db.LogAudit(r.Context(), s.pool, u.ID, "user.login_locked", "user", u.ID, "", r.RemoteAddr)
@@ -132,8 +139,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	claims, _ := claimsFrom(r)
 	u, err := db.GetUserByID(r.Context(), s.pool, claims.UserID)
-	if err != nil {
+	if errors.Is(err, db.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if err != nil {
+		// Not a 404: the frontend logs the user out on that, and a database
+		// outage shouldn't end anyone's session.
+		log.Printf("httpapi: load user %s: %v", claims.UserID, err)
+		writeError(w, http.StatusInternalServerError, "could not load user")
 		return
 	}
 	writeJSON(w, http.StatusOK, userPayload{u.ID, u.Email, u.DisplayName})

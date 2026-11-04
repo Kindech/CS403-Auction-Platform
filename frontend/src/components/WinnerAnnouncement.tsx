@@ -1,5 +1,6 @@
 import type { Bid, Item } from "../types";
 import { formatMoney } from "../lib/format";
+import { leadingBidId } from "../lib/bidding";
 
 export function WinnerAnnouncement({
   item,
@@ -13,6 +14,7 @@ export function WinnerAnnouncement({
   bids: Bid[];
 }) {
   const hasWinner = !!winnerName;
+  const leaderId = hasWinner ? leadingBidId(bids) : null;
   return (
     <div className="max-w-2xl mx-auto text-center">
       <div className="bg-ink text-cream rounded-xl p-10 mb-8">
@@ -46,8 +48,12 @@ export function WinnerAnnouncement({
               <tr key={b.id} className="border-t border-slate-100">
                 <td className="px-4 py-2.5">{b.user_name}</td>
                 <td className="px-4 py-2.5 font-mono-digits">{formatMoney(b.amount)}</td>
-                <td className={`px-4 py-2.5 font-medium ${b.status === "accepted" ? "text-emerald-600" : "text-red-500"}`}>
-                  {b.status === "accepted" ? "ชนะ" : "ถูกปฏิเสธ"}
+                <td
+                  className={`px-4 py-2.5 font-medium ${
+                    b.id === leaderId ? "text-emerald-600" : b.status === "accepted" ? "text-ink-muted" : "text-red-500"
+                  }`}
+                >
+                  {b.id === leaderId ? "ชนะ" : b.status === "accepted" ? "ถูกแซง" : "ถูกปฏิเสธ"}
                 </td>
                 <td className="px-4 py-2.5 text-ink-muted">{new Date(b.created_at).toLocaleTimeString()}</td>
               </tr>

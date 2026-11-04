@@ -38,24 +38,30 @@ func GetUserByEmail(ctx context.Context, pool *pgxpool.Pool, email string) (mode
 	return u, err
 }
 
-// RegisterFailedLogin atomically increments the account's failed-attempt
-// counter and, once it reaches maxAttempts, locks the account for
-// lockoutDuration and resets the counter for the next window. Returns
-// whether this call was the one that triggered the lock.
-func RegisterFailedLogin(ctx context.Context, pool *pgxpool.Pool, userID string, maxAttempts int, lockoutDuration time.Duration) (justLocked bool, err error) {
+// ClaimLoginAttempt spends one of the account's login attempts, and is called
+// before the password is checked. The account's row is locked by the UPDATE
+// and the WHERE clause is re-checked against the newest row version, so no
+// matter how many requests arrive at once, at most maxAttempts passwords get
+// checked before the lock. allowed is false if the account is locked;
+// justLocked means this attempt was the last one (a correct password still
+// clears it, through ResetFailedLogins).
+//
+// Counting after the password check instead let parallel guesses all pass the
+// lock check first: 40 at once were all evaluated despite a limit of 5, and a
+// CTE-based increment lost updates on top of that.
+func ClaimLoginAttempt(ctx context.Context, pool *pgxpool.Pool, userID string, maxAttempts int, lockoutDuration time.Duration) (allowed, justLocked bool, err error) {
 	err = pool.QueryRow(ctx, `
-		WITH next AS (
-			SELECT failed_login_attempts + 1 AS attempts FROM users WHERE id = $1
-		)
-		UPDATE users u
-		SET failed_login_attempts = CASE WHEN next.attempts >= $2 THEN 0 ELSE next.attempts END,
-		    locked_until = CASE WHEN next.attempts >= $2 THEN now() + make_interval(secs => $3) ELSE u.locked_until END
-		FROM next
-		WHERE u.id = $1
-		RETURNING next.attempts >= $2`,
+		UPDATE users
+		SET failed_login_attempts = CASE WHEN failed_login_attempts + 1 >= $2 THEN 0 ELSE failed_login_attempts + 1 END,
+		    locked_until = CASE WHEN failed_login_attempts + 1 >= $2 THEN now() + make_interval(secs => $3) ELSE locked_until END
+		WHERE id = $1 AND (locked_until IS NULL OR locked_until <= now())
+		RETURNING locked_until IS NOT NULL AND locked_until > now()`,
 		userID, maxAttempts, lockoutDuration.Seconds(),
 	).Scan(&justLocked)
-	return justLocked, err
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, nil
+	}
+	return err == nil, justLocked, err
 }
 
 // ResetFailedLogins clears the failed-attempt counter and any active lock -

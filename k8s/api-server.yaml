@@ -57,7 +57,7 @@ spec:
             - { name: POSTGRES_MAX_CONNS, value: "10" }
             - { name: HTTP_ADDR, value: ":8080" }
             - { name: BID_RATE_LIMIT_PER_SEC, value: "10" }
-            - { name: CORS_ORIGIN, value: "*" }
+            - { name: CORS_ORIGIN, value: "http://localhost:8080" }
           ports:
             - containerPort: 8080
           # Short probe periods so a crashed pod leaves the Service's

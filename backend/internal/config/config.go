@@ -31,6 +31,9 @@ type Config struct {
 	MetricsAddr        string // bid-worker's standalone /metrics server (api-server exposes it on HTTPAddr instead)
 }
 
+// DefaultJWTSecret is for local development; api-server warns when it's in use.
+const DefaultJWTSecret = "dev-secret-change-me"
+
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -78,11 +81,11 @@ func Load() Config {
 		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
 		KafkaBrokers:   splitList(getEnv("KAFKA_BROKERS", "localhost:9092")),
 		KafkaTopic:     getEnv("KAFKA_TOPIC", "bid-requests"),
-		JWTSecret:      getEnv("JWT_SECRET", "dev-secret-change-me"),
+		JWTSecret:      getEnv("JWT_SECRET", DefaultJWTSecret),
 
 		HTTPAddr:           getEnv("HTTP_ADDR", ":8080"),
 		BidRateLimitPerSec: getEnvInt("BID_RATE_LIMIT_PER_SEC", 10),
-		CORSOrigin:         getEnv("CORS_ORIGIN", "*"),
+		CORSOrigin:         getEnv("CORS_ORIGIN", "http://localhost:8080"),
 
 		KafkaGroupID:       getEnv("KAFKA_GROUP_ID", "bid-worker"),
 		AntiSnipeWindow:    getEnvDuration("ANTI_SNIPE_WINDOW", 60*time.Second),

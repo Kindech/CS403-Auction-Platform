@@ -16,13 +16,16 @@
 | TC-09 | API Server Failover *(เพิ่ม)* | §2.5.9 + §3.6.3 — api-server ตายกลางการประมูล ผู้ใช้ reconnect ผ่าน nginx แล้วได้ราคาล่าสุด และไม่พลาดบิดถัดไป | node |
 | TC-10 | Kafka Restart *(เพิ่ม)* | §2.6.4 — Kafka หยุดแล้วกลับมา ทุกบิดได้คำตอบ, "ระบบขัดข้อง" แปลว่าไม่ถูกบันทึกจริง, ไม่มีบิดหาย/ซ้ำ | node |
 | TC-11 | Postgres Outage *(เพิ่ม)* | §2.6.4 — Postgres ล่มระหว่างประมูล การบิดยัง real-time และพอกลับมา `bids` + `audit_log` ครบไม่ซ้ำ | node |
+| TC-12 | Redis Outage *(เพิ่ม)* | Redis ล่มแล้วผู้บิดได้คำตอบทันที ไม่มีบิดที่ถูกปฏิเสธถูกรับทีหลัง และกลับมาบิดได้เอง | node |
+| TC-13 | Close With Backlog *(เพิ่ม)* | §3.1.1 — worker ตามงานไม่ทันตอนถึงเวลาปิด บิดที่ส่งทันเวลาต้องนับทุกตัว | node |
+| TC-14 | Deleted Item *(เพิ่ม)* | สินค้าถูกลบกลางการประมูล บิดของสินค้าอื่นยังบันทึกลง Postgres ได้ | node |
 
 ## สิ่งที่ต้องมีก่อน
 
 - เปิด compose stack ไว้แล้ว: `cd ../deploy && docker compose up -d --build`
 - ติดตั้ง [k6](https://k6.io/) (หรือใช้ `docker run --rm -i grafana/k6 run - <script.js`)
-- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08 ถึง TC-11
-- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08 ถึง TC-11 สั่ง `docker compose` เพื่อ kill/เพิ่ม/หยุด
+- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08 ถึง TC-14
+- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08 ถึง TC-14 สั่ง `docker compose` เพื่อ kill/เพิ่ม/หยุด
   container และลบข้อมูลทดสอบ)
 
 ทุกสคริปต์ใช้ `BASE_URL=http://localhost:8080` (nginx) เป็นค่าเริ่มต้น เปลี่ยนได้ด้วย
@@ -43,6 +46,9 @@ node chaos/tc08_scaleout_fanout.mjs      # ~10 วินาที
 node chaos/tc09_api_failover.mjs         # ~15 วินาที
 node chaos/tc10_kafka_restart.mjs        # ~1 นาที (หยุด Kafka 10 วินาที แล้วรอให้กลับมา)
 node chaos/tc11_postgres_outage.mjs      # ~40 วินาที (หยุด Postgres 15 วินาที)
+node chaos/tc12_redis_outage.mjs         # ~30 วินาที (หยุด Redis 10 วินาที)
+node chaos/tc13_close_with_backlog.mjs   # ~45 วินาที (หยุด bid-worker จนเลยเวลาปิด)
+node chaos/tc14_deleted_item.mjs         # ~10 วินาที
 ```
 
 หรือรันทั้งหมดด้วย `./run_all.sh` (หยุดทันทีที่ตัวไหน fail)
@@ -156,7 +162,52 @@ join ใหม่ ลด `SessionTimeout` ของ reader เหลือ 10 �
 ครบ 10 วินาทีหลังเปิด Postgres (`writeLoop` retry แบบ backoff สูงสุด 10 วินาที), `bids` 44/44,
 `audit_log` 44/44, Kafka lag 0 Kubernetes — ผลเหมือนกัน ช้าสุด 24ms
 
-### ใช้ TC-08 ถึง TC-11 กับ Kubernetes
+## TC-12 Redis Outage — ทำอะไรบ้าง
+
+1. สร้าง user ทดสอบ 2 คนและสินค้า 1 ชิ้น ต่อ viewer 20 คน + bidder 1 คน
+2. บิดตอนปกติ → **หยุด Redis 10 วินาที** ระหว่างนั้นบิดต่อ → เปิดกลับ แล้วบิดจนผ่าน
+3. ตรวจว่า:
+   - บิดตอนล่มได้ `service_unavailable` ทุกตัว และตอบภายใน 2 วินาที
+   - ไม่มีบิดที่ถูกปฏิเสธถูกรับทีหลัง ราคาใน Redis = บิดสุดท้ายที่รับ
+   - ระบบกลับมาบิดได้เอง และ viewer ทุกคนได้ราคาสดอีกครั้ง (api-server subscribe ใหม่เอง)
+4. เปิด Redis กลับเสมอ และลบข้อมูลทดสอบ
+
+**ปัญหาที่ test นี้เจอ (แก้แล้ว):** ผู้บิดไม่ได้ยินอะไรเลยตลอดช่วงที่ Redis ล่ม (ลองแล้ว 30 วินาที) เพราะ `bid-worker`
+ต้องใช้ Redis ทั้งตัดสินและแจ้งผล ตอนนี้ api-server เช็ก Redis อยู่ตลอดและตอบเองทันที การแก้รอบแรก
+(ping ก่อนส่งทุกบิด) ยังตอบช้า ~7 วินาทีเพราะการ dial Redis ที่ปิดอยู่ค้างนาน จึงเปลี่ยนเป็นเช็กแยกใน background
+
+ข้อจำกัด: ช่วง ~2.5 วินาทีแรกที่ยังตรวจไม่พบ บิดที่เข้า Kafka ไปแล้วจะถูกบันทึกเป็น `internal_error` หรือรับตอน
+Redis กลับมา ขึ้นกับจังหวะ โดยผู้บิดอาจไม่ได้คำตอบ เพราะช่องทางแจ้งผลก็คือ Redis เอง
+
+## TC-13 Close With Backlog — ทำอะไรบ้าง
+
+1. สร้างสินค้า 8 ชิ้นที่จบใน 25 วินาที และอีก 1 ชิ้นที่ไม่มีคนบิด
+2. **หยุด `bid-worker`** แล้วบิดทุกชิ้นก่อนเวลาจบ บิดจึงค้างอยู่ใน Kafka
+3. รอจนเลยเวลาจบ แล้วเปิด `bid-worker` กลับ
+4. ตรวจว่า:
+   - บิดทั้ง 8 ถูกรับ ไม่มีตัวไหนถูกปฏิเสธ (Postgres ตรงกัน)
+   - ไม่มีการประมูลไหนจบ เพราะบิดทุกตัวอยู่ในช่วง anti-snipe จึงต่อเวลาแทน
+   - สินค้าที่ไม่มีคนบิดยังปิดตามปกติ
+5. เปิด `bid-worker` กลับเสมอ และลบข้อมูลทดสอบ
+
+**ปัญหาที่ test นี้เจอ (แก้แล้ว):** การปิดประมูลเคยตัดสินจากนาฬิกาอย่างเดียว ไม่ได้ดูว่ามีบิดค้างในคิวหรือไม่ ทดสอบแบบ
+เดียวกัน 6 จาก 8 บิดที่ส่ง 7 วินาทีก่อนเวลาปิดถูกปฏิเสธเป็น `auction_not_live` และสินค้าจบแบบไม่มีผู้ชนะ ตอนนี้ปิดผ่าน
+close marker ที่อยู่ใน Kafka partition เดียวกับบิด ซึ่งต้องอ่านบิดก่อนหน้าครบก่อนเสมอ
+
+## TC-14 Deleted Item — ทำอะไรบ้าง
+
+1. สร้างสินค้า 2 ชิ้น ต่อ bidder เข้าทั้งคู่ แล้ว**ลบชิ้นหนึ่งออกจาก Postgres ตรง ๆ** (เหมือนลบใน pgAdmin)
+2. บิดทั้งสองชิ้น
+3. ตรวจว่า:
+   - บิดของสินค้าอีกชิ้นถูกบันทึกลง Postgres และ Kafka lag กลับเป็น 0
+   - บิดที่บันทึกไม่ได้มีหลักฐานใน `audit_log` (`bid.dropped`)
+   - สินค้าที่ถูกลบไม่รับบิดอีก (`auction_not_live`)
+4. ลบข้อมูลทดสอบ
+
+**ปัญหาที่ test นี้เจอ (แก้แล้ว):** INSERT ชน foreign key แล้ว `bid-worker` retry batch นั้นไม่หยุด ทำให้บิดของ
+**ทุกสินค้า** ไม่ถูกบันทึกอีกเลย แม้ restart worker ก็ไม่หาย เพราะ Kafka ส่ง batch เดิมซ้ำ
+
+### ใช้ TC-06, TC-08 ถึง TC-14 กับ Kubernetes
 
 ตั้ง `TARGET=k8s` แล้วสคริปต์จะทำงานกับ deployment ใน `k8s/` (namespace `auction`) แทน compose:
 
@@ -170,8 +221,10 @@ $env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
 - TC-08: ให้ **HPA สร้าง pod ใหม่เอง** (เพิ่ม `minReplicas` ขึ้น 1 ชั่วคราว) แล้วต่อเข้าแต่ละ pod ผ่าน
   `kubectl port-forward` (port 18081, 18082, ...) จบแล้วคืนค่า `minReplicas`
 - TC-09: force-delete api-server pod ที่เก่าที่สุด แล้วตรวจเพิ่มว่า Kubernetes สร้าง pod มาแทนเอง
-- TC-10 / TC-11: หยุด Kafka / Postgres ด้วย `kubectl scale statefulset <ชื่อ> --replicas=0` แล้วเปิดกลับ
-  ด้วย `--replicas=1` (ข้อมูลอยู่ใน PVC ไม่หาย)
+- TC-06: force-delete pod ของ `bid-worker` แล้วให้ Kubernetes สร้างตัวใหม่เอง
+- TC-10 / TC-11 / TC-12: หยุด Kafka / Postgres / Redis ด้วย `kubectl scale statefulset <ชื่อ> --replicas=0`
+  แล้วเปิดกลับด้วย `--replicas=1` (ข้อมูลอยู่ใน PVC ไม่หาย)
+- TC-13: หยุด `bid-worker` ด้วย `kubectl scale deployment bid-worker --replicas=0`
 - การลบข้อมูลทดสอบใช้ `kubectl exec postgres-0` / `redis-0` แทน `docker compose exec`
 
 สำหรับ compose เปลี่ยนคำสั่งที่ใช้เพิ่ม/ลด/kill instance ได้ด้วย env var:
@@ -181,18 +234,17 @@ $env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
 | `API_URLS` | TC-08 | `http://localhost:8081,http://localhost:8082,http://localhost:8083` (ตัวสุดท้าย = ตัวใหม่) |
 | `SCALE_UP_CMD` / `SCALE_DOWN_CMD` | TC-08 | `docker compose run ... api-1` เป็น `deploy-api-3` / `docker rm -f deploy-api-3` |
 | `KILL_CMD` / `RESTORE_CMD` | TC-09 | `docker compose kill -s SIGKILL api-1` / `docker compose start api-1` |
-| `STOP_CMD` / `START_CMD` | TC-10, TC-11 | `docker compose stop kafka` / `docker compose start kafka` (TC-11: `postgres`) |
-| `DOWN_MS` | TC-10, TC-11 | ระยะที่หยุด service: 10000 / 15000 ms |
+| `STOP_CMD` / `START_CMD` | TC-10, TC-11, TC-12 | `docker compose stop kafka` / `docker compose start kafka` (TC-11: `postgres`, TC-12: `redis`) |
+| `DOWN_MS` | TC-10, TC-11, TC-12 | ระยะที่หยุด service: 10000 / 15000 / 10000 ms |
 
 `k6/hpa_autoscale_load.js` ไม่ใช่ TC ในรายงาน — เป็นโหลดแบบ "ทุกคนเปิดดูหน้าประมูล" ต่อเนื่อง 2 นาที ใช้โชว์
 HPA บน Kubernetes (`k8s\run-k6.ps1 -Script hpa_autoscale_load.js`) ดู `k8s/README.md`
 
 ## การลบข้อมูลทดสอบ
 
-TC-08 ถึง TC-11 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
+TC-08 ถึง TC-14 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
 Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก่อนลบจะรอให้ `bid-worker`
-เขียนแถว `bids` ของสินค้านั้นลง Postgres ครบก่อน เพราะถ้าลบสินค้าขณะ batch ยังไม่ได้เขียน INSERT
-จะชน foreign key แล้ว `bid-worker` จะ retry batch นั้นไม่หยุด ทำให้การเขียนครั้งต่อ ๆ ไปค้างหมด
+เขียนแถว `bids` ของสินค้านั้นลง Postgres ครบก่อน เพื่อไม่ให้เหลือแถว `bid.dropped` ค้างใน `audit_log`
 
 สคริปต์ k6 แต่ละตัวสร้างสินค้า (และ user ถ้าจำเป็น) ของตัวเองใน `setup()` จึงรันซ้ำกับ stack ที่ใช้งาน
 อยู่ได้โดยไม่กวนกันและไม่กวนการทดสอบผ่านหน้าเว็บ แต่**ไม่ได้ลบทิ้งเอง** ถ้าต้องการข้อมูล demo
@@ -205,7 +257,8 @@ Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก�
 - TC-02/TC-04/TC-05/TC-07 ตรวจจริงผ่าน `check()` ใน `default`/`teardown` — ถ้าต้องการรู้ว่า fail
   ตรงไหน ให้ดู console output รอบ ๆ `"exactly 1 bid was accepted"` เป็นต้น
 - TC-06 เป็น bash script พิมพ์ `PASS`/`FAIL` และ exit 0/1 ตามนั้น เปิด `bid-worker` กลับให้เสมอ
-- TC-08 ถึง TC-11 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
+- TC-08 ถึง TC-14 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
+- `k8s\run-k6.ps1` พิมพ์ `PASS`/`FAIL` และ exit 0/1 ตามผลของ k6
 
 ## ปรับค่า
 

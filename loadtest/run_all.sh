@@ -35,4 +35,13 @@ node chaos/tc10_kafka_restart.mjs
 echo "### TC-11 Postgres Outage"
 node chaos/tc11_postgres_outage.mjs
 
+echo "### TC-12 Redis Outage"
+node chaos/tc12_redis_outage.mjs
+
+echo "### TC-13 Auction Closing With a Backlog"
+node chaos/tc13_close_with_backlog.mjs
+
+echo "### TC-14 Item Deleted Mid-Auction"
+node chaos/tc14_deleted_item.mjs
+
 echo "All load/chaos tests passed."

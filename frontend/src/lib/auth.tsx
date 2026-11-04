@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { api, getToken, setToken } from "./api";
+import { api, ApiError, getToken, setToken } from "./api";
 import type { User } from "../types";
 
 interface AuthContextValue {
@@ -29,7 +29,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     api
       .get<User>("/me")
       .then(setUser)
-      .catch(() => setToken(null))
+      .catch((err) => {
+        // Only when the server says the token or account is no good. A network
+        // error or a 500 (e.g. Postgres restarting) mustn't log anyone out.
+        if (err instanceof ApiError && (err.status === 401 || err.status === 404)) setToken(null);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -61,6 +65,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 }
 
+// oxlint-disable-next-line react/only-export-components -- the hook belongs next to its provider
 export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error("useAuth must be used within AuthProvider");

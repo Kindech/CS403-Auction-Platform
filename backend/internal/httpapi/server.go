@@ -26,7 +26,7 @@ func NewServer(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, wsDeps 
 
 func (s *Server) Router() http.Handler {
 	r := chi.NewRouter()
-	r.Use(chimw.Logger, chimw.Recoverer, corsMiddleware(s.cfg.CORSOrigin), metricsMiddleware)
+	r.Use(realIPFromProxy, redactTokenFromLogs, chimw.Logger, chimw.Recoverer, corsMiddleware(s.cfg.CORSOrigin), metricsMiddleware)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	r.Handle("/metrics", promhttp.Handler())

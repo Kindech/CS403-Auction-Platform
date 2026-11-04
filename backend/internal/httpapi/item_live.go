@@ -27,6 +27,7 @@ func (s *Server) attachLivePrices(r *http.Request, items []models.Item) {
 		if items[i].WinnerName != nil && items[i].WinnerID != nil && *items[i].WinnerID != viewerID {
 			masked := models.MaskDisplayName(*items[i].WinnerName)
 			items[i].WinnerName = &masked
+			items[i].WinnerID = nil // a stable ID would link the masked name across items
 		}
 	}
 }

@@ -5,7 +5,7 @@ package ws
 // the fan-out path trivial: a server that receives a message from the worker
 // forwards it (almost) verbatim to the room.
 type Event struct {
-	Type string `json:"type"` // sync | price_update | bid_rejected | auction_ended
+	Type string `json:"type"` // sync | price_update | bid_rejected | outbid | auction_ended
 
 	ItemID string `json:"item_id"`
 

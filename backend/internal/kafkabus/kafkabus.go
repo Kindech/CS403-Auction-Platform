@@ -43,6 +43,17 @@ func (p *Producer) PublishBid(ctx context.Context, req models.BidRequest) error 
 	})
 }
 
+// PublishItemClose writes an item's close marker. Same key as the item's bids,
+// so same partition: it is read back after every bid already queued for it.
+func (p *Producer) PublishItemClose(ctx context.Context, itemID string) error {
+	now := time.Now()
+	payload, err := json.Marshal(models.BidRequest{Kind: models.KindItemClose, ItemID: itemID, Timestamp: now})
+	if err != nil {
+		return err
+	}
+	return p.writer.WriteMessages(ctx, kafka.Message{Key: []byte(itemID), Value: payload, Time: now})
+}
+
 // EnsureBidExpiry makes the broker refuse any bid that reaches it more than
 // maxAge after it was placed (record timestamp = BidRequest.Timestamp), via
 // the topic's message.timestamp.before.max.ms. kafka-go's Writer keeps

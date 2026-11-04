@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strconv"
+	"strings"
 )
 
 // MaxBidAmount is the largest value the NUMERIC(14,2) money columns can
@@ -12,9 +14,22 @@ import (
 // field overflow" - and take the rest of its batch down with it.
 const MaxBidAmount = 999_999_999_999.99
 
-// ValidBidAmount reports whether a bid amount can be adjudicated and stored.
+// ValidBidAmount reports whether an amount of money can be adjudicated and
+// stored. More than 2 decimals is refused: Postgres would round it, leaving
+// 110.126 in Redis but 110.13 in the bids table.
 func ValidBidAmount(a float64) bool {
-	return !math.IsNaN(a) && !math.IsInf(a, 0) && a > 0 && a <= MaxBidAmount
+	if math.IsNaN(a) || math.IsInf(a, 0) || a <= 0 || a > MaxBidAmount {
+		return false
+	}
+	s := strconv.FormatFloat(a, 'f', -1, 64) // shortest form that round-trips
+	dot := strings.IndexByte(s, '.')
+	return dot < 0 || len(s)-dot-1 <= 2
+}
+
+// Cents converts a valid amount to whole cents, so comparisons aren't thrown
+// off by float rounding (0.1 + 0.2 is more than 0.3 in floats).
+func Cents(a float64) int64 {
+	return int64(math.Round(a * 100))
 }
 
 // NewUUID returns a random (version 4) UUID string.

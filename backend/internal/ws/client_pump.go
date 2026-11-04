@@ -47,9 +47,12 @@ type inboundBid struct {
 	Amount float64 `json:"amount"`
 }
 
-// readPump is driven by handler.go's readLoop via ReadOne; this file only
-// hosts the always-running keepalive plumbing shared by every connection.
+// maxInboundBytes caps one message from a browser; a bid is about 40 bytes.
+const maxInboundBytes = 1024
+
+// configureKeepalive prepares the connection for handler.go's readLoop.
 func (c *Client) configureKeepalive() {
+	c.Conn.SetReadLimit(maxInboundBytes)
 	c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 	c.Conn.SetPongHandler(func(string) error {
 		c.Conn.SetReadDeadline(time.Now().Add(pongWait))

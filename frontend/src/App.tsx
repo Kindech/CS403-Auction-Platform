@@ -9,6 +9,7 @@ import { Register } from "./pages/Register";
 import { AuctionRoom } from "./pages/AuctionRoom";
 import { SellerTools } from "./pages/SellerTools";
 import { MyBids } from "./pages/MyBids";
+import { NotFound } from "./pages/NotFound";
 
 export default function App() {
   return (
@@ -37,6 +38,7 @@ export default function App() {
                   </ProtectedRoute>
                 }
               />
+              <Route path="*" element={<NotFound />} />
             </Route>
           </Routes>
         </AuthProvider>

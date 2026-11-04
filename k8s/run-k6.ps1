@@ -55,5 +55,27 @@ $extraEnv          volumeMounts:
 "@ | kubectl apply -f - | Out-Null
 
 Write-Host "k6 Job started for $Script - following its output (Ctrl+C stops following, not the Job)"
-kubectl -n $ns wait --for=condition=Ready pod -l job-name=k6 --timeout=120s | Out-Null
+# From here on a kubectl error must not stop the script: "Stop" would also trip
+# on the "no pods yet" message written to stderr while the Job is starting.
+$ErrorActionPreference = "Continue"
+
+# Wait for the pod to start. Not "kubectl wait --for=condition=Ready": a short
+# script can already have finished by then, and a finished pod is never Ready.
+$deadline = (Get-Date).AddSeconds(120)
+do {
+    Start-Sleep -Seconds 1
+    $phase = kubectl -n $ns get pods -l job-name=k6 -o "jsonpath={.items[0].status.phase}" 2>$null
+} until ($phase -in "Running", "Succeeded", "Failed" -or (Get-Date) -gt $deadline)
+
 kubectl -n $ns logs -f job/k6
+
+# Report k6's own verdict (failed thresholds), so this can be used as a test.
+$deadline = (Get-Date).AddSeconds(30)
+do {
+    Start-Sleep -Seconds 1
+    $ok = kubectl -n $ns get job k6 -o "jsonpath={.status.succeeded}" 2>$null
+    $failed = kubectl -n $ns get job k6 -o "jsonpath={.status.failed}" 2>$null
+} until ($ok -or $failed -or (Get-Date) -gt $deadline)
+if ($ok) { Write-Host "PASS: $Script"; exit 0 }
+Write-Host "FAIL: $Script"
+exit 1
