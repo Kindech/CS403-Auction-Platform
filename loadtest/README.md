@@ -64,6 +64,54 @@ failover ตอนปิด api-1 — แล้วลบ item TC-06 ที่ส
 powershell -ExecutionPolicy Bypass -File loadtest\demo_resilience.ps1
 ```
 
+## TC-03 / TC-04 — ผู้บิดคนละบัญชี
+
+TC-03 (2000 VU) และ TC-04 (1000 VU) สมัครบัญชีให้ **VU ละ 1 บัญชี** ใน `setup()` ผ่าน
+`/api/auth/register` จริง ("TC03 Bidder 1..2000", "TC04 Sniper 1..1000", อีเมล `*@loadtest.local`)
+แล้วรอผ่าน Prometheus ใน cluster จน api-server กลับมาที่ 2 pod และ CPU ต่ำกว่า 20% ก่อนเริ่มวัด
+(`registerUsers` / `waitForBaseline` ใน `k6/lib/common.js`) เพราะ bcrypt ของการสมัครหลายพันบัญชีทำให้
+HPA เพิ่ม pod ถ้าเริ่มวัดทันทีผลจะไม่ได้เริ่มจากจุดเดียวกันทุกรอบ ถ้า Prometheus ไม่อยู่ (compose) จะข้ามการรอ
+หรือปิดได้ด้วย `-e PROM_URL=""`
+
+ทั้งสองตัวนับข้อความที่ได้รับแยกประเภท (`msg_sync`, `msg_price_update`, `msg_rejected_rate_limited`,
+`msg_rejected_bid_too_low`, `msg_other`) แสดงใต้ `THRESHOLDS` ผลรวมต้องเท่ากับ `ws_msgs_received`
+
+**ปัญหาที่เจอ (แก้ใน test แล้ว):** เดิมทุก VU ใช้ `bidder@example.com` บัญชีเดียว แต่ `bid_too_low` ส่งไปทุก
+connection ของเจ้าของบิด (ให้ผู้ใช้ที่เปิดหลายแท็บเห็นครบ) TC-03 จึงทำให้ 1 บิดที่ถูกปฏิเสธกลายเป็น ~2000
+ข้อความ api-server ต้องทิ้งข้อความเกือบ 3 ล้านครั้งเพราะ buffer ของ client เต็ม (ระบบไม่ล่มเพราะออกแบบให้ทิ้ง
+แทนการ block) ไม่ใช่สิ่งที่ผู้ใช้จริงเจอ หลังแยกบัญชี ข้อความถูกทิ้ง = 0 ดูได้จาก metric ใหม่
+`auction_ws_messages_dropped_total` และ panel "WebSocket messages sent / dropped" ใน Grafana
+
+**สิ่งที่ TC-03 เห็น (ข้อจำกัดของการออกแบบ):** throttle ยอมให้ผ่าน 10 บิด/วินาที/connection รวมได้ถึง
+20,000 บิด/วินาที แต่ `bid-worker` ตัวเดียวตัดสินได้ ~1,900 บิด/วินาที บิดจึงต่อคิวใน Kafka และถูกตัดสินครบใน
+~1.5 นาทีหลัง test จบ ไม่มีบิดหาย (DB ครบทุกตัว) แต่ผลของบิดที่ถูกตัดสินหลัง client ปิด connection ไปแล้วไม่มีคนรับ
+
+## เก็บผลลงรายงาน (`loadtest/report/`)
+
+สคริปต์ PowerShell สำหรับรัน test บน Kubernetes แล้วดึงหลักฐานไปใส่รายงาน (รันจาก root ของ repo)
+เวลาทุกตัวเป็นเวลาไทย:
+
+| สคริปต์ | ทำอะไร |
+|---|---|
+| `run_chaos.ps1 -Script <ไฟล์>` | รัน chaos test ใน `chaos/` ด้วย `TARGET=k8s` (`.mjs` ด้วย node, `.sh` ด้วย Git Bash) พิมพ์เวลาเริ่ม/จบไว้ตั้งช่วงเวลาใน Grafana |
+| `show_bids.ps1 -Title "TC-02%"` | ตาราง `bids` ของสินค้าล่าสุดที่ชื่อตรง (เวลา, ผู้บิด, จำนวน, status, reason) |
+| `show_bids.ps1 -Title "TC-03%" -Summary` | นับบิดแยก status/reason + จำนวนผู้บิด, เวลาบิดแรก/สุดท้าย, ผู้นำ (สำหรับ test ที่มีบิดหลักหมื่น) |
+| `show_item.ps1 -Title "TC-05%"` | เวลาเริ่ม/จบ (เห็น `end_time` ที่ anti-snipe เลื่อน), status, ราคาจบ, ผู้ชนะ |
+| `show_audit.ps1 -Title "TC-05%"` | `audit_log` ของสินค้านั้นตามลำดับเวลา |
+
+ตัวอย่าง:
+```powershell
+powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc02_race_condition_duel.js
+```
+```powershell
+powershell -ExecutionPolicy Bypass -File loadtest\report\show_bids.ps1 -Title "TC-02%"
+```
+```powershell
+powershell -ExecutionPolicy Bypass -File loadtest\report\run_chaos.ps1 -Script tc06_worker_crash_replay.sh
+```
+
+ผลทั้ง 14 ตัวจากรอบเก็บผลอยู่ในตาราง "ผลทดสอบ" ของ [`k8s/README.md`](../k8s/README.md)
+
 ## TC-08 Scale-out Fan-out — ทำอะไรบ้าง
 
 1. เปิด api-server ตัวที่ 3 (`deploy-api-3` ที่ port 8083) ด้วย `docker compose run` — ไม่มี config
@@ -232,6 +280,7 @@ $env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
 | Env | ใช้กับ | ค่าเริ่มต้น |
 |---|---|---|
 | `API_URLS` | TC-08 | `http://localhost:8081,http://localhost:8082,http://localhost:8083` (ตัวสุดท้าย = ตัวใหม่) |
+| `HOLD_MS` | TC-08, TC-09 | ถือ connection ไว้ให้ Prometheus/Grafana เห็น (test จริงสั้นกว่ารอบ scrape 5s): K8s 20000 ms (TC-08) / 15000 ms ก่อนและหลัง crash (TC-09), compose 0 |
 | `SCALE_UP_CMD` / `SCALE_DOWN_CMD` | TC-08 | `docker compose run ... api-1` เป็น `deploy-api-3` / `docker rm -f deploy-api-3` |
 | `KILL_CMD` / `RESTORE_CMD` | TC-09 | `docker compose kill -s SIGKILL api-1` / `docker compose start api-1` |
 | `STOP_CMD` / `START_CMD` | TC-10, TC-11, TC-12 | `docker compose stop kafka` / `docker compose start kafka` (TC-11: `postgres`, TC-12: `redis`) |
@@ -247,8 +296,13 @@ Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก�
 เขียนแถว `bids` ของสินค้านั้นลง Postgres ครบก่อน เพื่อไม่ให้เหลือแถว `bid.dropped` ค้างใน `audit_log`
 
 สคริปต์ k6 แต่ละตัวสร้างสินค้า (และ user ถ้าจำเป็น) ของตัวเองใน `setup()` จึงรันซ้ำกับ stack ที่ใช้งาน
-อยู่ได้โดยไม่กวนกันและไม่กวนการทดสอบผ่านหน้าเว็บ แต่**ไม่ได้ลบทิ้งเอง** ถ้าต้องการข้อมูล demo
-ที่สะอาด ให้ลบสินค้าที่ชื่อขึ้นต้นด้วย `TC-0` ผ่าน pgAdmin หรือ `psql`
+อยู่ได้โดยไม่กวนกันและไม่กวนการทดสอบผ่านหน้าเว็บ แต่**ไม่ได้ลบทิ้งเอง** (เก็บไว้เป็นหลักฐาน) ถ้าต้องการข้อมูล
+demo ที่สะอาด ให้ลบสินค้าที่ชื่อขึ้นต้นด้วย `TC-0` และบัญชี `*@loadtest.local` (TC-03 สร้างรอบละ 2000,
+TC-04 รอบละ 1000) ผ่าน pgAdmin หรือ `psql` นับบัญชีที่มีอยู่ได้ด้วย:
+```sql
+SELECT split_part(display_name, ' ', 1) || ' ' || split_part(display_name, ' ', 2) AS account_group, count(*)
+FROM users WHERE email LIKE '%@loadtest.local' GROUP BY 1;
+```
 
 ## อ่านผลยังไง
 
@@ -288,6 +342,9 @@ VUs, request rate, p99 duration และ check pass rate แบบสดระ�
 บน Kubernetes `k8s\run-k6.ps1` push metric ของ k6 เข้า Prometheus ใน cluster ให้อัตโนมัติ เปิด Grafana
 ที่ `http://localhost:3000` ได้เลย (ดู `k8s/README.md`)
 
-TC-08/TC-09 ไม่ได้ใช้ k6 จึงไม่ push เข้า Prometheus และรันแค่ไม่กี่วินาที ซึ่งสั้นกว่ารอบ scrape
-5 วินาที กราฟใน Grafana จึงแทบไม่เห็น ให้ดูผลจากที่สคริปต์พิมพ์ออกมาแทน (มี latency p50/p95 ให้แล้ว)
-TC-10/TC-11 ก็ไม่ได้ใช้ k6 เช่นกัน และพิมพ์เวลาตอบของทุกบิดออกมาให้แล้ว
+TC-08/TC-09 ไม่ได้ใช้ k6 และตัว test รันแค่ 2–4 วินาที สั้นกว่ารอบ scrape 5 วินาที บน Kubernetes
+จึงถือ connection ไว้เพิ่ม (`HOLD_MS`) ให้ panel "WebSocket connections per pod" เห็น: TC-08 เห็น 3 pod รวม pod
+ที่ HPA เพิ่ม (ค่าใกล้กันมากจนเส้นทับกัน ให้ hover ดู tooltip) และพิมพ์จำนวนจาก `/metrics` ของแต่ละ pod ให้ด้วย
+TC-09 เห็น connection ย้ายจาก pod ที่ถูกลบไป pod ที่เหลือ (เช่น 48/53 → 0/101) panel WebSocket และ k6 VUs แสดง
+ค่าสูงสุดในแต่ละช่วง (`max_over_time`) จึงไม่พลาด spike สั้น ๆ แม้ตั้งช่วงเวลากว้าง TC-10 ถึง TC-14 พิมพ์ผลของทุกบิด
+ออกมาให้แล้ว ใช้ผลจาก terminal เป็นหลัก

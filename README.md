@@ -470,7 +470,17 @@ kubectl apply -k k8s
 ```
 
 วิธีติดตั้ง (build image, metrics-server) วิธีดู HPA scale สด (ใน Grafana ที่ http://localhost:3000 หรือ
-`kubectl`), self-healing, การรัน TC-08 ถึง TC-11 บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
+`kubectl`), self-healing, การรัน TC-01 ถึง TC-14 บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
+
+**เก็บผลลงรายงาน:** `loadtest/report/` มีสคริปต์รัน chaos test บน K8s พร้อมพิมพ์เวลาเริ่ม/จบ (ไว้ตั้งช่วงเวลาใน
+Grafana) และดึงหลักฐานจาก Postgres มาแสดง เช่น
+```powershell
+powershell -ExecutionPolicy Bypass -File loadtest\report\run_chaos.ps1 -Script tc10_kafka_restart.mjs
+```
+```powershell
+powershell -ExecutionPolicy Bypass -File loadtest\report\show_bids.ps1 -Title "TC-03%" -Summary
+```
+รายละเอียดอยู่ใน [`loadtest/README.md`](loadtest/README.md#เก็บผลลงรายงาน-loadtestreport)
 
 ผลสำคัญ: ยิงโหลด 300 VU ต่อเนื่อง HPA เพิ่ม api-server จาก 2 → 6 pod แล้วลดกลับเมื่อโหลดหยุด
 และการ scale จริงเจอปัญหาที่ compose ไม่เคยเจอ — connection pool ของ 6 pod รวมกันเกิน

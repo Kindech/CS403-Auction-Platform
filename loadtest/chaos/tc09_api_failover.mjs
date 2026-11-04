@@ -27,6 +27,16 @@ import { api, register, createLiveItem, waitFor, sleep, runCmd, Viewer, check, a
 
 const BASE = process.env.BASE_URL || "http://localhost:8080";
 const VIEWERS = Number(process.env.VIEWERS || 100);
+// The test itself takes ~4s, shorter than Prometheus's 5s scrape: on K8s the
+// viewers are held HOLD_MS before the crash and again after recovery, so
+// Grafana's "WebSocket connections per pod" shows them split over both pods,
+// then all on the survivor.
+const HOLD_MS = Number(process.env.HOLD_MS ?? (K8S ? 15000 : 0));
+const hold = async (why) => {
+  if (HOLD_MS <= 0) return;
+  console.log(`    holding ${HOLD_MS / 1000}s ${why}, so Prometheus/Grafana record it`);
+  await sleep(HOLD_MS);
+};
 
 let podsBefore = [];
 let victim;
@@ -65,6 +75,7 @@ try {
   bidderWs.bid(150);
   await waitFor(() => viewers.every((v) => v.got("price_update", (e) => e.price === 150)), 5000, "price_update 150 everywhere");
   check(true, `all ${VIEWERS} viewers got price 150 before the crash`);
+  await hold("with the viewers spread over both pods");
 
   console.log(K8S ? "==> Killing an api-server pod" : "==> SIGKILL api-1");
   const killedAt = Date.now();
@@ -96,6 +107,7 @@ try {
   const lat = got200.map((v) => v.got("price_update", (e) => e.price === 200).at - sentAt);
   if (lat.length) console.log(`    delivery latency after failover: p50=${percentile(lat, 50)}ms max=${Math.max(...lat)}ms`);
   ctx.expectedBids = 2;
+  await hold("with every viewer on the surviving pod(s)");
 } catch (e) {
   check(false, `test aborted: ${e.message}`);
 } finally {

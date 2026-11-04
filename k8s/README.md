@@ -294,6 +294,27 @@ powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc03_stress_thro
 | TC-12, TC-13, TC-14 | ผ่าน: Redis ล่มได้คำตอบทันที, บิดทันเวลาที่ค้างในคิวนับครบ 8/8, สินค้าถูกลบไม่กระทบสินค้าอื่น |
 | ทุก test บน Kubernetes | TC-01 ถึง TC-14 ผ่านครบ 14/14 |
 
+### รอบเก็บผลลงรายงาน (4–5 พ.ย. 2026, commit `0447dac` + ปรับ test)
+
+| TC | ผล |
+|---|---|
+| TC-01 Fan-out | 500/500 ได้ `price_update`, กระจาย 248/252 บน 2 pod, ต่อ WebSocket p95 175ms |
+| TC-02 Race Condition | บิด 150 พร้อมกันห่างกัน 4ms → accepted 1 / rejected (`bid_too_low`) 1 |
+| TC-03 Stress (2000 **บัญชี**) | ต่อสำเร็จ 9,695 ครั้ง, `ws_errors` 0, บิด 193,900 = throttle 79,308 + ลง DB 114,592, ข้อความถูกทิ้ง 0, HPA 2→4 |
+| TC-04 Sniping (1000 บัญชี) | 1,000 คนบิด 110 ภายใน 0.42s → ชนะ 1 / `bid_too_low` 999, ทุกคนได้ราคาใหม่ 1000/1000 |
+| TC-05 Soft-close | บิดตอนเหลือ 90s ไม่เลื่อนเวลา, ตอนเหลือ 55s เลื่อนเป็นเวลาบิด + 60s, บิดผ่านหน้าเว็บตอนเหลือ 14s เลื่อนอีกรอบ, ปิดเองพร้อมผู้ชนะ |
+| TC-06 Worker crash | force-delete `bid-worker` กลางทาง → pod ใหม่ใน ~3s, replay ครบ 30/30, `request_id` ไม่ซ้ำ |
+| TC-07 Reconnect | ก่อนหลุด `sync` 100 → อีกบัญชีบิด 150 → ต่อใหม่ได้ `sync` 150 |
+| TC-08 Scale-out | HPA 2→3, connection 51/50/51 ต่อ pod, ได้ครบ 50/50 ทุก pod รวม pod ใหม่, รั่ว 0, p95 22ms |
+| TC-09 Failover | หลุด 48/101, ต่อใหม่ครบ 48/48 ใน ~1.25s ด้วยราคาถูกต้อง, pod ที่เหลือรับ 101 connection, K8s สร้าง pod แทนเอง |
+| TC-10 Kafka | ตอนล่มได้ `service_unavailable` ใน 3s, ไม่มีบิดถูกรับทีหลัง, กลับมาเองใน 18.7s, DB 7/7 |
+| TC-11 Postgres | บิดระหว่างล่ม 36/36 ช้าสุด 17ms, เขียนตามครบใน 10.8s, `bids`/`audit_log` 42/42, lag 0 |
+| TC-12 Redis | ตอนล่ม 17/17 ได้คำตอบใน ≤1ms, กลับมาเองใน 2.3s, viewer 20/20 |
+| TC-13 Close with backlog | บิดทันเวลาที่ค้างคิว accepted 8/8, ปิดทับบิด 0/8 |
+| TC-14 Deleted item | บิดสินค้าอื่นลง DB 2/2, lag 0, บิดที่เขียนไม่ได้เป็น `bid.dropped` |
+
+วิธีรันแต่ละตัวพร้อมดึงหลักฐานจาก DB: ดู "เก็บผลลงรายงาน" ใน [`loadtest/README.md`](../loadtest/README.md)
+
 **ปัญหาที่เจอจาก TC-03 (2000 viewer):** WebSocket handshake ล้มเหลว 2–3% เพราะ nginx worker ถูก kernel kill
 (`worker process exited on signal 9`) จาก memory limit 128Mi ของ pod `frontend` — WebSocket ที่ proxy แต่ละเส้นถือ buffer
 ของ nginx และ `worker_processes auto` เปิด worker ตามจำนวน core ของ node แก้โดยเพิ่ม limit เป็น 512Mi และตั้ง 2 worker

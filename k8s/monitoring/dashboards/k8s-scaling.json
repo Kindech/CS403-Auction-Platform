@@ -118,11 +118,13 @@
     {
       "id": 8,
       "type": "timeseries",
-      "title": "WebSocket connections per pod",
+      "title": "WebSocket connections per pod (peak in each interval)",
+      "description": "max_over_time, so connections held for only a few seconds (TC-01 holds them 8s) still show when the time range is wide.",
       "gridPos": { "x": 12, "y": 14, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "interval": "5s",
       "targets": [
-        { "expr": "auction_ws_connections_active{job=\"api-server\"}", "refId": "A", "legendFormat": "{{pod}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "max_over_time(auction_ws_connections_active{job=\"api-server\"}[$__interval])", "refId": "A", "legendFormat": "{{pod}}", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "decimals": 0, "min": 0 }, "overrides": [] }
     },
@@ -144,10 +146,29 @@
       "title": "k6 virtual users (runs started with k8s/run-k6.ps1)",
       "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "interval": "5s",
       "targets": [
-        { "expr": "sum(k6_vus)", "refId": "A", "legendFormat": "VUs", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+        { "expr": "sum(max_over_time(k6_vus[$__interval]))", "refId": "A", "legendFormat": "VUs", "datasource": { "type": "prometheus", "uid": "prometheus" } }
       ],
       "fieldConfig": { "defaults": { "decimals": 0, "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "WebSocket messages sent / dropped per second (all pods)",
+      "description": "Dropped = the client's send buffer was full, so the event was thrown away instead of holding up the broadcast to everyone else.",
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(rate(auction_ws_messages_sent_total{job=\"api-server\"}[15s]))", "refId": "A", "legendFormat": "sent", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "sum(rate(auction_ws_messages_dropped_total{job=\"api-server\"}[15s]))", "refId": "B", "legendFormat": "dropped", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 0, "min": 0 },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "dropped" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      }
     }
   ]
 }

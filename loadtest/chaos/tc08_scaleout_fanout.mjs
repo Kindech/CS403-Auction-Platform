@@ -124,6 +124,22 @@ try {
   const lat = [...lat150, ...lat200];
   console.log(`    delivery latency bid -> viewer over ${lat.length} deliveries: p50=${percentile(lat, 50)}ms p95=${percentile(lat, 95)}ms max=${Math.max(...lat)}ms`);
   ctx.expectedBids = 3;
+
+  // Each instance's own count of open WebSockets, read from its /metrics -
+  // the same gauge Grafana plots. The connections are then held open for
+  // HOLD_MS so Prometheus (5s scrapes, and a new pod is only discovered a few
+  // seconds after it starts) records them: the test itself takes ~2s.
+  console.log("==> Open WebSockets per instance, from each one's /metrics");
+  for (const url of URLS) {
+    const text = await (await fetch(`${url}/metrics`)).text();
+    const n = text.match(/^auction_ws_connections_active (\S+)$/m)?.[1];
+    console.log(`    ${url}${url === NEW_URL ? " (new instance)" : ""}: auction_ws_connections_active = ${n}`);
+  }
+  const hold = Number(process.env.HOLD_MS ?? (K8S ? 20000 : 0));
+  if (hold > 0) {
+    console.log(`==> Holding the connections open ${hold / 1000}s so Prometheus/Grafana record them`);
+    await sleep(hold);
+  }
 } catch (e) {
   check(false, `test aborted: ${e.message}`);
 } finally {

@@ -30,6 +30,22 @@ var (
 		Help: "Currently open WebSocket connections on this instance.",
 	})
 
+	// WSMessagesSentTotal counts events queued to a WebSocket client.
+	WSMessagesSentTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "auction_ws_messages_sent_total",
+		Help: "WebSocket events queued for delivery to a client on this instance.",
+	})
+
+	// WSMessagesDroppedTotal counts events thrown away because the client's
+	// send buffer was full (a client reading slower than events arrive):
+	// dropping keeps one slow client from holding up everyone else's
+	// broadcast. A client that missed one resyncs on its next event or
+	// reconnect.
+	WSMessagesDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "auction_ws_messages_dropped_total",
+		Help: "WebSocket events dropped because the client's send buffer was full.",
+	})
+
 	// BidsTotal counts every bid-worker adjudication outcome.
 	BidsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "auction_bids_total",

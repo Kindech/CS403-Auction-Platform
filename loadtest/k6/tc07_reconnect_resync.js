@@ -5,7 +5,7 @@
 // never the stale price it had before dropping.
 import ws from "k6/ws";
 import { check, sleep } from "k6";
-import { login, freshItem, wsUrlFor } from "./lib/common.js";
+import { login, register, freshItem, wsUrlFor } from "./lib/common.js";
 
 export const options = {
   vus: 1,
@@ -58,16 +58,19 @@ export default function () {
 
   // 1. Connect and capture the initial sync (should be the starting price).
   const firstSync = connectAndGetSync(item.id, bidderA.token);
+  console.log(`1) Demo Bidder connected: sync price = ${firstSync} (starting price 100), then disconnected`);
   check(null, { "initial sync reflects starting price": () => firstSync === 100 });
 
   // 2. Disconnect happens implicitly (socket.close() above). While "away",
   //    someone else raises the price.
   sleep(0.5);
-  const racer = login("bidder@example.com", "password123"); // same demo account is fine; identity doesn't matter here
-  placeBidAndWait(item.id, racer.token, 150);
+  const other = register("tc07-other-bidder", "password123", "TC07 Other Bidder");
+  placeBidAndWait(item.id, other.token, 150);
+  console.log("2) while Demo Bidder was away, TC07 Other Bidder bid 150");
   sleep(0.5);
 
   // 3. Reconnect - must resync to the NEW price, not the stale 100.
   const secondSync = connectAndGetSync(item.id, bidderA.token);
+  console.log(`3) Demo Bidder reconnected: sync price = ${secondSync} (expected 150, not the stale 100)`);
   check(null, { "reconnect sync reflects the price that changed while disconnected": () => secondSync === 150 });
 }

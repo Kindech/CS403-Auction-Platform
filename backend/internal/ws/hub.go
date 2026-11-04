@@ -59,7 +59,9 @@ func (h *Hub) Unregister(c *Client) {
 func (h *Hub) send(c *Client, payload []byte) {
 	select {
 	case c.Send <- payload:
+		metrics.WSMessagesSentTotal.Inc()
 	default:
+		metrics.WSMessagesDroppedTotal.Inc()
 		log.Printf("ws: client send buffer full, dropping message for user=%s item=%s", c.UserID, c.ItemID)
 	}
 }
