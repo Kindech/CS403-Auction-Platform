@@ -19,13 +19,14 @@
 | TC-12 | Redis Outage *(เพิ่ม)* | Redis ล่มแล้วผู้บิดได้คำตอบทันที ไม่มีบิดที่ถูกปฏิเสธถูกรับทีหลัง และกลับมาบิดได้เอง | node |
 | TC-13 | Close With Backlog *(เพิ่ม)* | §3.1.1 — worker ตามงานไม่ทันตอนถึงเวลาปิด บิดที่ส่งทันเวลาต้องนับทุกตัว | node |
 | TC-14 | Deleted Item *(เพิ่ม)* | สินค้าถูกลบกลางการประมูล บิดของสินค้าอื่นยังบันทึกลง Postgres ได้ | node |
+| TC-15 | Redis Crash *(เพิ่ม)* | Redis ถูก kill -9 แล้วไม่เสียบิดที่ตอบรับไปแล้ว และถ้า state หาย/ล้าหลัง (เครื่องดับ) `bid-worker` ซ่อมจาก Postgres ก่อนบิดถัดไป | node |
 
 ## สิ่งที่ต้องมีก่อน
 
 - เปิด compose stack ไว้แล้ว: `cd ../deploy && docker compose up -d --build`
 - ติดตั้ง [k6](https://k6.io/) (หรือใช้ `docker run --rm -i grafana/k6 run - <script.js`)
-- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08 ถึง TC-14
-- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08 ถึง TC-14 สั่ง `docker compose` เพื่อ kill/เพิ่ม/หยุด
+- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08 ถึง TC-15
+- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08 ถึง TC-15 สั่ง `docker compose` เพื่อ kill/เพิ่ม/หยุด
   container และลบข้อมูลทดสอบ)
 
 ทุกสคริปต์ใช้ `BASE_URL=http://localhost:8080` (nginx) เป็นค่าเริ่มต้น เปลี่ยนได้ด้วย
@@ -49,6 +50,7 @@ node chaos/tc11_postgres_outage.mjs      # ~40 วินาที (หยุด 
 node chaos/tc12_redis_outage.mjs         # ~30 วินาที (หยุด Redis 10 วินาที)
 node chaos/tc13_close_with_backlog.mjs   # ~45 วินาที (หยุด bid-worker จนเลยเวลาปิด)
 node chaos/tc14_deleted_item.mjs         # ~10 วินาที
+node chaos/tc15_redis_crash.mjs          # ~30 วินาที (kill -9 Redis แล้วจำลองข้อมูลหาย)
 ```
 
 หรือรันทั้งหมดด้วย `./run_all.sh` (หยุดทันทีที่ตัวไหน fail)
@@ -227,6 +229,24 @@ join ใหม่ ลด `SessionTimeout` ของ reader เหลือ 10 �
 ข้อจำกัด: ช่วง ~2.5 วินาทีแรกที่ยังตรวจไม่พบ บิดที่เข้า Kafka ไปแล้วจะถูกบันทึกเป็น `internal_error` หรือรับตอน
 Redis กลับมา ขึ้นกับจังหวะ โดยผู้บิดอาจไม่ได้คำตอบ เพราะช่องทางแจ้งผลก็คือ Redis เอง
 
+## TC-15 Redis Crash — ทำอะไรบ้าง
+
+TC-12 หยุด Redis แบบปกติ (Redis ได้ save ก่อนออก) test นี้ฆ่าแบบไม่ให้ตั้งตัว แล้วไปไกลกว่าที่การฆ่าทำได้
+
+1. สร้าง user ทดสอบ 3 คน (ผู้ขาย + ผู้บิด 2 คนบิดสลับกัน) และสินค้า 1 ชิ้น ต่อ viewer 10 คน
+2. **kill -9:** บิดแล้ว **ส่ง SIGKILL ให้ Redis ทันทีหลังได้คำตอบ** (compose: `docker compose kill -s SIGKILL`,
+   K8s: `docker kill -s KILL` ที่ container ของ `redis-0` — `kubectl delete pod` ใช้ไม่ได้เพราะ kubelet ส่ง SIGTERM
+   ก่อนและ Redis จะ save เรียบร้อย) ตรวจว่า exit code = 137, Redis กลับมายังมีบิดล่าสุด และบิดต่อได้เอง
+3. **AOF วินาทีสุดท้ายหาย (เครื่องดับ) — จำลอง:** การฆ่า process ไม่ทำให้ข้อมูลหาย เพราะ Redis ส่งทุกคำสั่งให้ OS
+   ก่อนตอบ แต่ถ้าเครื่องดับ OS จะยังไม่ได้เขียนวินาทีสุดท้ายลงดิสก์ test จึงย้อน state ใน Redis ไปเป็นบิดก่อนหน้า
+   (คนละผู้นำ ราคาต่ำกว่า) เหมือนข้อมูลหายจริง แล้วตรวจว่า `bid-worker` คืนราคาและผู้นำจาก Postgres และบิดที่
+   "สูงพอสำหรับ state เก่าแต่ไม่พอสำหรับราคาจริง" ถูกปฏิเสธเป็น `bid_too_low`
+4. **state หายทั้ง key:** ลบ key ทิ้ง ตรวจว่า `bid-worker` สร้างกลับมาด้วยราคาและผู้นำจริง แล้วบิดต่อได้
+5. ตรวจว่า Postgres มีบิด accepted ตรงกับที่ผู้บิดเห็น ไม่ซ้ำ และ viewer ทุกคนเห็นราคาสุดท้าย แล้วลบข้อมูลทดสอบ
+
+ผลบน Kubernetes (7 พ.ย. 2026): exit code 137, ไม่มีบิดหาย (ราคาหลัง kill = บิดสุดท้าย), บิดได้อีกครั้ง 0.8–1.9 วินาที
+หลัง Redis ตอบ, ซ่อม state ที่ล้าหลังใน 0.7–1.0 วินาที, สร้าง key ที่หายใหม่ใน 0.4 วินาที, Postgres 7/7 ไม่ซ้ำ
+
 ## TC-13 Close With Backlog — ทำอะไรบ้าง
 
 1. สร้างสินค้า 8 ชิ้นที่จบใน 25 วินาที และอีก 1 ชิ้นที่ไม่มีคนบิด
@@ -255,7 +275,7 @@ close marker ที่อยู่ใน Kafka partition เดียวกั�
 **ปัญหาที่ test นี้เจอ (แก้แล้ว):** INSERT ชน foreign key แล้ว `bid-worker` retry batch นั้นไม่หยุด ทำให้บิดของ
 **ทุกสินค้า** ไม่ถูกบันทึกอีกเลย แม้ restart worker ก็ไม่หาย เพราะ Kafka ส่ง batch เดิมซ้ำ
 
-### ใช้ TC-06, TC-08 ถึง TC-14 กับ Kubernetes
+### ใช้ TC-06, TC-08 ถึง TC-15 กับ Kubernetes
 
 ตั้ง `TARGET=k8s` แล้วสคริปต์จะทำงานกับ deployment ใน `k8s/` (namespace `auction`) แทน compose:
 
@@ -291,7 +311,7 @@ HPA บน Kubernetes (`k8s\run-k6.ps1 -Script hpa_autoscale_load.js`) ดู `k
 
 ## การลบข้อมูลทดสอบ
 
-TC-08 ถึง TC-14 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
+TC-08 ถึง TC-15 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
 Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก่อนลบจะรอให้ `bid-worker`
 เขียนแถว `bids` ของสินค้านั้นลง Postgres ครบก่อน เพื่อไม่ให้เหลือแถว `bid.dropped` ค้างใน `audit_log`
 
@@ -311,7 +331,7 @@ FROM users WHERE email LIKE '%@loadtest.local' GROUP BY 1;
 - TC-02/TC-04/TC-05/TC-07 ตรวจจริงผ่าน `check()` ใน `default`/`teardown` — ถ้าต้องการรู้ว่า fail
   ตรงไหน ให้ดู console output รอบ ๆ `"exactly 1 bid was accepted"` เป็นต้น
 - TC-06 เป็น bash script พิมพ์ `PASS`/`FAIL` และ exit 0/1 ตามนั้น เปิด `bid-worker` กลับให้เสมอ
-- TC-08 ถึง TC-14 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
+- TC-08 ถึง TC-15 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
 - `k8s\run-k6.ps1` พิมพ์ `PASS`/`FAIL` และ exit 0/1 ตามผลของ k6
 
 ## ปรับค่า

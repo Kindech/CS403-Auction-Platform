@@ -44,4 +44,7 @@ node chaos/tc13_close_with_backlog.mjs
 echo "### TC-14 Item Deleted Mid-Auction"
 node chaos/tc14_deleted_item.mjs
 
+echo "### TC-15 Redis Crash"
+node chaos/tc15_redis_crash.mjs
+
 echo "All load/chaos tests passed."

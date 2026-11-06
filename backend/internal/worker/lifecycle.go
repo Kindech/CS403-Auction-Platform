@@ -33,15 +33,9 @@ const lifecycleDBTimeout = 2 * time.Second
 type lifecycleSnapshot struct {
 	activated []models.Item
 	live      []models.Item
-	// leading holds the leading bid of each live item that had no Redis
-	// state when the snapshot was read, for applyLifecycle to rebuild it.
-	leading map[string]leadingBid
-}
-
-type leadingBid struct {
-	bidderID, bidderName string
-	amount               float64
-	found                bool
+	// leading holds the leading accepted bid of every live item that has one,
+	// for applyLifecycle to rebuild missing Redis state or correct stale state.
+	leading map[string]db.LeadingBid
 }
 
 // lifecycleLoop reads a snapshot every TickInterval and sends it to Run.
@@ -88,17 +82,8 @@ func (w *Worker) readLifecycle(ctx context.Context) (lifecycleSnapshot, error) {
 	if s.live, err = db.ListLiveItems(ctx, w.pool); err != nil {
 		return s, fmt.Errorf("list live items: %w", err)
 	}
-	s.leading = map[string]leadingBid{}
-	for _, it := range s.live {
-		if exists, err := redisstate.Exists(ctx, w.rdb, it.ID); err != nil || exists {
-			continue
-		}
-		var lb leadingBid
-		lb.bidderID, lb.bidderName, lb.amount, lb.found, err = db.GetLeadingBid(ctx, w.pool, it.ID)
-		if err != nil {
-			return s, fmt.Errorf("look up leading bid for item %s: %w", it.ID, err)
-		}
-		s.leading[it.ID] = lb
+	if s.leading, err = db.LeadingBidsForLiveItems(ctx, w.pool); err != nil {
+		return s, fmt.Errorf("look up leading bids: %w", err)
 	}
 	return s, nil
 }
@@ -140,6 +125,7 @@ func (w *Worker) applyLifecycle(ctx context.Context, s lifecycleSnapshot) {
 		if err != nil {
 			continue
 		}
+		lb, hasBid := s.leading[it.ID]
 		if !ok {
 			// Live in Postgres but no Redis state - either it never had any
 			// (seed data inserted directly as "live") or Redis lost it (e.g.
@@ -147,30 +133,59 @@ func (w *Worker) applyLifecycle(ctx context.Context, s lifecycleSnapshot) {
 			// trail, not just the starting price: otherwise the item resets
 			// to its opening price and finalizes as "no bids" even though
 			// people bid on it.
-			lb, read := s.leading[it.ID]
-			if !read {
-				continue // it had state when the snapshot was read; look again next tick
-			}
 			state = models.AuctionState{
 				ItemID:       it.ID,
 				Price:        it.StartingPrice,
 				MinIncrement: it.BidIncrement,
 				EndTimeMs:    it.EndTime.UnixMilli(),
 			}
-			if lb.found {
-				state.Price, state.BidderID, state.BidderName = lb.amount, lb.bidderID, lb.bidderName
+			if hasBid {
+				state.Price, state.BidderID, state.BidderName = lb.Amount, lb.BidderID, lb.BidderName
 			}
 			if err := redisstate.Init(ctx, w.rdb, state); err != nil {
 				log.Printf("worker: backfill redis state for item %s: %v", it.ID, err)
 				continue
 			}
+			metrics.RedisStateRepairsTotal.WithLabelValues("rebuilt").Inc()
 			log.Printf("worker: backfilled missing redis state for live item %s", it.ID)
+		} else if fixed, changed := reconcileState(state, it, lb, hasBid); changed {
+			// Redis has the item but is behind Postgres: it lost writes it had
+			// already acknowledged (an OS or power crash takes up to the last
+			// second of the AOF with it). Every row in Postgres was accepted
+			// into Redis first, so Postgres can only be behind Redis, never
+			// ahead - unless Redis lost data. Put the missing bid back so the
+			// next bid is judged against the real price.
+			if err := redisstate.Init(ctx, w.rdb, fixed); err != nil {
+				log.Printf("worker: reconcile redis state for item %s: %v", it.ID, err)
+				continue
+			}
+			metrics.RedisStateRepairsTotal.WithLabelValues("reconciled").Inc()
+			log.Printf("worker: redis state of item %s was behind postgres (price %.2f -> %.2f, end %d -> %d) - restored",
+				it.ID, state.Price, fixed.Price, state.EndTimeMs, fixed.EndTimeMs)
+			state = fixed
 		}
 		if !closeDue(state, nowMs) {
 			continue
 		}
 		w.requestClose(it.ID)
 	}
+}
+
+// reconcileState brings an item's Redis state up to what Postgres proves it
+// had: the leading accepted bid and the (anti-snipe extended) end time. It only
+// ever moves state forward, so a snapshot that is a moment older than Redis
+// (bids accepted since, rows still being batched) changes nothing.
+func reconcileState(state models.AuctionState, it models.Item, lb db.LeadingBid, hasBid bool) (models.AuctionState, bool) {
+	changed := false
+	if hasBid && models.Cents(lb.Amount) > models.Cents(state.Price) {
+		state.Price, state.BidderID, state.BidderName = lb.Amount, lb.BidderID, lb.BidderName
+		changed = true
+	}
+	if end := it.EndTime.UnixMilli(); end > state.EndTimeMs {
+		state.EndTimeMs = end
+		changed = true
+	}
+	return state, changed
 }
 
 // closeDue reports whether an item can be finalized once every bid already in

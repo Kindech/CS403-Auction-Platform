@@ -309,9 +309,40 @@ apply โดยตัวเดียว และเพราะ schema ถู�
 | `CHECK (email = lower(email))` บน `users` | `Bob@x.com` กับ `bob@x.com` เป็นสองบัญชีไม่ได้ |
 | `idx_audit_log_entity` | ค้น timeline "ทุกอย่างที่เกิดกับ item X" ได้เร็ว |
 
-Redis เปิด AOF persistence บน volume `redis-data` ถ้า live state หายอยู่ดี `bid-worker` จะสร้าง
-ใหม่จากแถวที่ accepted สูงสุดใน `bids` การประมูลที่กำลังดำเนินอยู่จึงยังได้ราคาและผู้นำจริง ไม่ถูก
-รีเซ็ต
+Redis เปิด AOF persistence (`appendfsync everysec`) บน volume `redis-data` ถ้า live state หายอยู่ดี
+`bid-worker` จะซ่อมจาก Postgres ทุกรอบ lifecycle (ทุก 1 วินาที) ด้วย query เดียว (`LeadingBidsForLiveItems`):
+
+- **key หายทั้งหมด** (volume หาย, Redis เปิดใหม่โดยไม่มีข้อมูล) → สร้างใหม่จากบิด accepted สูงสุดใน `bids`
+- **key ยังอยู่แต่ล้าหลัง** (reconcile) → ถ้า Postgres มีบิด accepted ที่สูงกว่าราคาใน Redis หรือ `end_time`
+  ที่ถูก anti-snipe เลื่อนไปไกลกว่า ให้ใช้ค่าจาก Postgres ทุกแถวใน Postgres ผ่าน Redis มาก่อนเสมอ
+  ดังนั้น Postgres "นำหน้า" Redis ได้ทางเดียวคือ Redis ทำข้อมูลที่ตอบรับไปแล้วหาย เช่นเครื่องดับทำให้
+  AOF วินาทีสุดท้ายไม่ถูกเขียนลงดิสก์ — ซ่อมแค่ "ไปข้างหน้า" จึงไม่ไปทับบิดใหม่ที่ยังรอเขียนลง Postgres
+
+ทุกครั้งที่ซ่อมจะนับใน metric `auction_redis_state_repairs_total{kind="rebuilt"|"reconciled"}` และมี log
+`redis state of item ... was behind postgres` ใน `bid-worker`
+
+ข้อจำกัดที่เหลือ: ระหว่างที่ Redis ล้าหลังจนถึงรอบ lifecycle ถัดไป (ไม่เกิน ~1 วินาที) บิดที่ต่ำกว่าราคาจริงอาจถูก
+รับได้ ผู้ชนะยังถูกต้องเพราะ reconcile คืนบิดที่สูงกว่า แต่ใน `bids` จะมีแถว accepted ที่ราคาต่ำกว่าผู้นำ
+
+**ทดสอบเอง (Redis ตายแบบ kill -9 และข้อมูลหาย):**
+```bash
+cd loadtest
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc15_redis_crash.mjs
+```
+(compose: `node chaos/tc15_redis_crash.mjs`) หรือลองด้วยมือ — เปิดหน้าประมูลค้างไว้ บิดสักสองสามครั้ง แล้วย้อนราคาใน
+Redis เองให้เหมือนข้อมูลหาย (ใส่ `<item-id>` จาก URL และราคาที่ต่ำกว่าราคาปัจจุบัน):
+```bash
+kubectl -n auction exec redis-0 -- redis-cli HSET item:<item-id>:state price 100
+```
+ภายใน ~1 วินาทีอ่านค่าอีกครั้งจะได้ราคาจริงกลับมา และ log ของ worker บอกว่าซ่อมแล้ว:
+```bash
+kubectl -n auction exec redis-0 -- redis-cli HGET item:<item-id>:state price
+```
+```bash
+kubectl -n auction logs deploy/bid-worker --tail=5
+```
 
 ## พัฒนา Backend
 
@@ -374,7 +405,7 @@ npm test      # กฎราคาขั้นต่ำ, จำนวนเง�
 `loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 10 test เพื่อพิสูจน์สิ่งที่รายงาน
 กล่าวไว้ในส่วนอื่นแต่ตารางไม่มี scenario (TC-05 soft-close extension, TC-06 worker crash/replay,
 TC-07 reconnect resync, TC-08 scale-out fan-out, TC-09 api-server failover, TC-10 Kafka restart,
-TC-11 Postgres outage, TC-12 Redis outage, TC-13 ปิดประมูลตอนมีบิดค้างในคิว, TC-14 สินค้าถูกลบกลางการประมูล)
+TC-11 Postgres outage, TC-12 Redis outage, TC-13 ปิดประมูลตอนมีบิดค้างในคิว, TC-14 สินค้าถูกลบกลางการประมูล, TC-15 Redis ถูก kill -9 / ข้อมูลหาย)
 รายละเอียดแต่ละตัว และวิธีอ่านผลอยู่ใน `loadtest/README.md`
 
 ทดสอบการ scale และ failover ของ api-server ได้เองด้วยคำสั่งเดียว (Node.js 22+, เปิด stack ไว้แล้ว):
@@ -470,7 +501,7 @@ kubectl apply -k k8s
 ```
 
 วิธีติดตั้ง (build image, metrics-server) วิธีดู HPA scale สด (ใน Grafana ที่ http://localhost:3000 หรือ
-`kubectl`), self-healing, การรัน TC-01 ถึง TC-14 บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
+`kubectl`), self-healing, การรัน TC-01 ถึง TC-15 บน K8s และผลทดสอบอยู่ใน [`k8s/README.md`](k8s/README.md)
 
 **เก็บผลลงรายงาน:** `loadtest/report/` มีสคริปต์รัน chaos test บน K8s พร้อมพิมพ์เวลาเริ่ม/จบ (ไว้ตั้งช่วงเวลาใน
 Grafana) และดึงหลักฐานจาก Postgres มาแสดง เช่น

@@ -65,6 +65,14 @@ var (
 		Help: "Total bids that could never be written to Postgres.",
 	})
 
+	// RedisStateRepairsTotal counts live items whose Redis state bid-worker
+	// fixed from Postgres: "rebuilt" (the key was missing) or "reconciled"
+	// (Redis was behind - it lost acknowledged writes in a crash).
+	RedisStateRepairsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "auction_redis_state_repairs_total",
+		Help: "Live items whose Redis state was rebuilt or corrected from Postgres.",
+	}, []string{"kind"})
+
 	// BidProcessingDuration times handleBid end-to-end (Redis read through
 	// notify), i.e. the "fast path" latency the report's NFRs are about.
 	BidProcessingDuration = promauto.NewHistogram(prometheus.HistogramOpts{

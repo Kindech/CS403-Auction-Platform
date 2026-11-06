@@ -342,22 +342,39 @@ func ListBidsForItem(ctx context.Context, pool *pgxpool.Pool, itemID string) ([]
 	return out, rows.Err()
 }
 
-// GetLeadingBid returns the highest accepted bid recorded for an item, if
-// any. Used to rebuild an item's Redis state from Postgres when Redis lost
-// it, so the item resumes at its real price/leader instead of resetting to
-// the starting price and finalizing as "no bids".
-func GetLeadingBid(ctx context.Context, pool *pgxpool.Pool, itemID string) (bidderID, bidderName string, amount float64, ok bool, err error) {
-	err = pool.QueryRow(ctx, `
-		SELECT b.user_id, u.display_name, b.amount
-		FROM bids b JOIN users u ON u.id = b.user_id
-		WHERE b.item_id = $1 AND b.status = 'accepted'
-		ORDER BY b.amount DESC, b.created_at ASC
-		LIMIT 1`, itemID,
-	).Scan(&bidderID, &bidderName, &amount)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", 0, false, nil
+// LeadingBid is the highest accepted bid on an item. Used to rebuild or
+// correct an item's Redis state from Postgres when Redis lost some or all of
+// it, so the item resumes at its real price/leader instead of an older one.
+type LeadingBid struct {
+	BidderID, BidderName string
+	Amount               float64
+}
+
+// LeadingBidsForLiveItems returns the leading accepted bid of every live item
+// that has one, in a single query (bid-worker reads it every lifecycle tick to
+// check Redis against Postgres).
+func LeadingBidsForLiveItems(ctx context.Context, pool *pgxpool.Pool) (map[string]LeadingBid, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT DISTINCT ON (b.item_id) b.item_id, b.user_id, u.display_name, b.amount
+		FROM bids b
+		JOIN items i ON i.id = b.item_id AND i.status = 'live'
+		JOIN users u ON u.id = b.user_id
+		WHERE b.status = 'accepted'
+		ORDER BY b.item_id, b.amount DESC, b.created_at ASC`)
+	if err != nil {
+		return nil, err
 	}
-	return bidderID, bidderName, amount, err == nil, err
+	defer rows.Close()
+	out := map[string]LeadingBid{}
+	for rows.Next() {
+		var id string
+		var lb LeadingBid
+		if err := rows.Scan(&id, &lb.BidderID, &lb.BidderName, &lb.Amount); err != nil {
+			return nil, err
+		}
+		out[id] = lb
+	}
+	return out, rows.Err()
 }
 
 func ListBidsForUser(ctx context.Context, pool *pgxpool.Pool, userID string) ([]models.Bid, error) {

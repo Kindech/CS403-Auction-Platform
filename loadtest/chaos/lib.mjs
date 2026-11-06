@@ -93,6 +93,29 @@ export function startService(name) {
   kubectl("scale", "statefulset", name, "--replicas=1");
 }
 
+// crashService kills a backing service's process with SIGKILL - no shutdown
+// handler runs, nothing is flushed - and lets it come back on the same data
+// (compose: kill + start; Kubernetes: kill the container from Docker, then the
+// kubelet restarts it in the same pod on the same PVC). `kubectl delete pod`
+// can't do this: the kubelet sends SIGTERM first, which Redis handles by
+// saving cleanly. Returns the exit code of the killed process (137 = SIGKILL).
+// Override with CRASH_CMD.
+export function crashService(name) {
+  if (process.env.CRASH_CMD) { runCmd(process.env.CRASH_CMD); return null; }
+  if (!K8S) {
+    compose("kill", "-s", "SIGKILL", name);
+    const id = compose("ps", "-a", "-q", name).trim();
+    const code = Number(execFileSync("docker", ["inspect", "-f", "{{.State.ExitCode}}", id], { encoding: "utf8" }).trim());
+    compose("start", name);
+    return code;
+  }
+  // Docker Desktop's Kubernetes runs pod containers in its Docker engine.
+  const container = execFileSync("docker", ["ps", "-q", "--filter", `name=k8s_${name}_${name}-0_${NS}_`], { encoding: "utf8" }).trim().split("\n")[0];
+  if (!container) throw new Error(`no running Docker container for ${name}-0 (only Docker Desktop's Kubernetes is supported; set CRASH_CMD)`);
+  execFileSync("docker", ["kill", "-s", "KILL", container], { stdio: "ignore" });
+  return Number(execFileSync("docker", ["inspect", "-f", "{{.State.ExitCode}}", container], { encoding: "utf8" }).trim());
+}
+
 // stopWorker / startWorker take bid-worker down and bring it back: a Deployment
 // on Kubernetes, unlike the StatefulSets above.
 export function stopWorker() {

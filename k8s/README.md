@@ -225,7 +225,7 @@ kubectl -n auction delete pod <ชื่อ pod จากคำสั่งบ�
 รัน `get pods` อีกครั้งจะเห็น pod ชื่อใหม่ที่ AGE ไม่กี่วินาที ถ้าเปิดหน้าประมูลค้างไว้ หน้าเว็บที่ต่ออยู่กับ pod
 ที่ถูกลบจะ reconnect เองภายในไม่กี่วินาที และราคายังถูกต้อง
 
-**TC-06, TC-08 ถึง TC-14 บน Kubernetes** (Node.js 22+):
+**TC-06, TC-08 ถึง TC-15 บน Kubernetes** (Node.js 22+):
 ```bash
 cd loadtest
 ```
@@ -312,6 +312,7 @@ powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc03_stress_thro
 | TC-12 Redis | ตอนล่ม 17/17 ได้คำตอบใน ≤1ms, กลับมาเองใน 2.3s, viewer 20/20 |
 | TC-13 Close with backlog | บิดทันเวลาที่ค้างคิว accepted 8/8, ปิดทับบิด 0/8 |
 | TC-14 Deleted item | บิดสินค้าอื่นลง DB 2/2, lag 0, บิดที่เขียนไม่ได้เป็น `bid.dropped` |
+| TC-15 Redis crash *(7 พ.ย., หลังรอบเก็บผล)* | kill -9 (exit 137) ไม่เสียบิด, บิดได้อีกใน 0.8s, state ที่ล้าหลังถูกซ่อมจาก Postgres ใน 1.0s, key ที่หายสร้างใหม่ใน 0.4s, DB 7/7 |
 
 วิธีรันแต่ละตัวพร้อมดึงหลักฐานจาก DB: ดู "เก็บผลลงรายงาน" ใน [`loadtest/README.md`](../loadtest/README.md)
 
