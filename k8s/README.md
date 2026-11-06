@@ -6,7 +6,7 @@
 
 | ไฟล์ | สิ่งที่สร้าง |
 |---|---|
-| `postgres.yaml`, `redis.yaml`, `kafka.yaml` | StatefulSet + PersistentVolumeClaim + Service (และ Job `kafka-init` สร้าง topic 6 partition) |
+| `postgres.yaml`, `redis.yaml`, `kafka.yaml` | StatefulSet + PersistentVolumeClaim + Service (Kafka 3 broker KRaft + headless Service, และ Job `kafka-init` สร้าง topic 6 partition × 3 replica) |
 | `api-server.yaml` | Deployment + Service + **HPA** (min 2, max 6, เป้า CPU 50%) |
 | `bid-worker.yaml` | Deployment 1 pod เสมอ (`strategy: Recreate` — ห้ามมี worker สองตัวพร้อมกัน) |
 | `frontend.yaml` + `nginx.conf` | nginx เสิร์ฟหน้าเว็บและ proxy ไป Service `api-server` เปิดเป็น LoadBalancer ที่ `localhost:8080` |
@@ -36,7 +36,15 @@
 | **api-server** | **2–6** ตาม CPU | ✅ HPA เพิ่ม/ลดเอง |
 | bid-worker | 1 (ทั้งระบบ ไม่ใช่ต่อสินค้า) | ❌ ตั้งใจให้มีตัวเดียว |
 | frontend (nginx) | 1 | ❌ ไม่มี state เพิ่ม replicas ได้ แต่ยังไม่จำเป็น |
-| Postgres / Redis / Kafka | 1 | ❌ ต้องทำเป็น cluster ซึ่งเกินขอบเขตของเครื่องเดียว |
+| Kafka | **3** broker (KRaft) | ❌ จำนวนตายตัว — broker ตาย 1 ตัว อีก 2 ตัวรับช่วง partition ต่อทันที (TC-16) |
+| Postgres / Redis | 1 | ❌ replica บนเครื่องเดียวไม่ช่วย (ดูด้านล่าง) |
+
+**ทำไม Kafka 3 ตัวแต่ Redis ตัวเดียว:** ทุก pod อยู่บน node เดียว (Docker Desktop) ถ้าเครื่องดับ replica ก็ดับด้วย
+replica จึงช่วยได้แค่ตอน process ตาย Redis เปิดใหม่ในไม่ถึง 1 วินาทีและ AOF ไม่เสียบิด (TC-15) Sentinel ที่ต้อง
+ตรวจพบแล้วสลับ master ไม่ได้เร็วกว่านั้น ส่วน Kafka เป็น JVM ที่เปิดใหม่ช้า (TC-10 ~7.7 วินาที) follower ที่มีข้อมูล
+ครบอยู่แล้วรับช่วงได้ใน ~1.5 วินาที จึงคุ้ม ใช้ KRaft (ไม่มี ZooKeeper ซึ่ง deprecate ใน Kafka 3.5 และถูกถอดใน 4.0)
+บนเครื่องเดียวระบบรับประกันว่าข้อมูลไม่หาย แต่ถ้าเครื่องดับบริการจะหยุดจนเครื่องกลับมา HA จริงต้องใช้หลาย node
+รายละเอียดใน [README หลัก](../README.md#kafka-กลับมาเร็วหลัง-restart-และ-3-broker-บน-kubernetes)
 
 **ทำไม scale api-server:** เป็นส่วนที่ภาระโตตามจำนวนคนโดยตรง — ถือ WebSocket ของผู้ชมทุกคน, รับ REST ทั้งหมด
 และส่งราคาใหม่ไปหาผู้ชมทุกคน (คนดู 10,000 คน = หนึ่งบิดต้องส่ง 10,000 ข้อความ) ช่วงที่คนแห่บิดตอนใกล้ปิด
@@ -164,6 +172,25 @@ Grafana อยู่ที่ **http://localhost:3000** (`admin` / `admin`) แ�
 kubectl -n auction rollout restart deploy/api-server deploy/bid-worker deploy/frontend
 ```
 
+**ถ้าเคย deploy ตอน Kafka ยังเป็น broker เดียว:** StatefulSet เดิมเปลี่ยนเป็น 3 broker ทับไม่ได้ และ topic เดิมมี
+replica เดียว ให้ลบของเดิม (บิดที่ยังไม่ถูกตัดสินในคิวจะหาย ส่วน Postgres/Redis ไม่กระทบ) แล้ว apply ใหม่และ restart
+backend:
+```bash
+kubectl -n auction delete statefulset kafka
+```
+```bash
+kubectl -n auction delete job kafka-init
+```
+```bash
+kubectl -n auction delete pvc data-kafka-0
+```
+```bash
+kubectl apply -k k8s
+```
+```bash
+kubectl -n auction rollout restart deploy/api-server deploy/bid-worker
+```
+
 **ลบทั้งหมด** (รวมข้อมูลใน PVC):
 ```bash
 kubectl delete namespace auction
@@ -225,7 +252,7 @@ kubectl -n auction delete pod <ชื่อ pod จากคำสั่งบ�
 รัน `get pods` อีกครั้งจะเห็น pod ชื่อใหม่ที่ AGE ไม่กี่วินาที ถ้าเปิดหน้าประมูลค้างไว้ หน้าเว็บที่ต่ออยู่กับ pod
 ที่ถูกลบจะ reconnect เองภายในไม่กี่วินาที และราคายังถูกต้อง
 
-**TC-06, TC-08 ถึง TC-15 บน Kubernetes** (Node.js 22+):
+**TC-06, TC-08 ถึง TC-16 บน Kubernetes** (Node.js 22+):
 ```bash
 cd loadtest
 ```
@@ -253,6 +280,12 @@ $env:TARGET="k8s"; node chaos/tc13_close_with_backlog.mjs
 ```powershell
 $env:TARGET="k8s"; node chaos/tc14_deleted_item.mjs
 ```
+```powershell
+$env:TARGET="k8s"; node chaos/tc15_redis_crash.mjs
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc16_kafka_broker_failover.mjs
+```
 - ทุกตัวจะรอให้ HPA กลับมาที่ขั้นต่ำก่อนเริ่ม (อาจนานถึง 2–3 นาทีหลัง load test) เพราะ pod ที่ถูกลดระหว่างทดสอบจะทำให้
   viewer หลุด
 - TC-06: force-delete pod ของ `bid-worker` → Kubernetes สร้างตัวใหม่เอง → Kafka ส่งบิดที่ยังไม่ commit ซ้ำให้
@@ -262,7 +295,8 @@ $env:TARGET="k8s"; node chaos/tc14_deleted_item.mjs
 - TC-09: **force-delete** api-server pod ที่เก่าที่สุด (ไม่มี graceful shutdown) → ตรวจว่า viewer ที่หลุด
   ต่อใหม่ได้ราคาล่าสุด และ Kubernetes สร้าง pod มาแทนเอง
 - TC-10 / TC-11: หยุด Kafka / Postgres ด้วย `kubectl scale statefulset kafka --replicas=0` (หรือ
-  `postgres`) ระหว่างที่มีคนบิดอยู่ แล้วเปิดกลับด้วย `--replicas=1` ข้อมูลอยู่ใน PVC จึงไม่หาย ลองเองก็ได้
+  `postgres`) ระหว่างที่มีคนบิดอยู่ แล้วเปิดกลับด้วยจำนวนเดิม (Kafka `--replicas=3`, Postgres `--replicas=1`)
+  ข้อมูลอยู่ใน PVC จึงไม่หาย ลองเองก็ได้
   ด้วยสองคำสั่งนี้ขณะเปิดหน้าประมูลไว้:
   ```bash
   kubectl -n auction scale statefulset postgres --replicas=0
@@ -272,6 +306,8 @@ $env:TARGET="k8s"; node chaos/tc14_deleted_item.mjs
   ```
 - TC-12: หยุด Redis แบบเดียวกัน (`redis`) TC-13: หยุด `bid-worker` จนเลยเวลาปิดด้วย
   `kubectl scale deployment bid-worker --replicas=0` TC-14: ลบสินค้าออกจาก Postgres ตรง ๆ
+- TC-15: `docker kill -s KILL` container ของ `redis-0` TC-16: `docker kill -s KILL` broker Kafka ที่เป็น leader
+  ของ partition ที่กำลังบิด แล้วตรวจว่าบิดต่อได้ก่อนที่มันจะ restart เสร็จ
 
 **k6 test อื่นบน Kubernetes** — script ไหนใน `loadtest/k6` ก็รันใน cluster ได้:
 ```powershell
@@ -313,6 +349,8 @@ powershell -ExecutionPolicy Bypass -File k8s\run-k6.ps1 -Script tc03_stress_thro
 | TC-13 Close with backlog | บิดทันเวลาที่ค้างคิว accepted 8/8, ปิดทับบิด 0/8 |
 | TC-14 Deleted item | บิดสินค้าอื่นลง DB 2/2, lag 0, บิดที่เขียนไม่ได้เป็น `bid.dropped` |
 | TC-15 Redis crash *(7 พ.ย., หลังรอบเก็บผล)* | kill -9 (exit 137) ไม่เสียบิด, บิดได้อีกใน 0.8s, state ที่ล้าหลังถูกซ่อมจาก Postgres ใน 1.0s, key ที่หายสร้างใหม่ใน 0.4s, DB 7/7 |
+| TC-10 Kafka *(7 พ.ย., หลังลดเวลารอ + 3 broker)* | หยุดทั้ง 3 broker 10 วินาที: กลับมาเองใน **7.7s** (เดิม 18.7s), ไม่มีบิดถูกรับทีหลัง, DB 7/7 |
+| TC-16 Kafka broker failover *(7 พ.ย.)* | kill -9 leader → leader ใหม่ใน ~1.7s, บิดผ่านอีกครั้งใน 4–6s (1 ใน 9 รอบ 13.6s), บิดไม่ถูกปฏิเสธ, DB 39/39 ไม่ซ้ำ, broker กลับมา sync ใน ~20s |
 
 วิธีรันแต่ละตัวพร้อมดึงหลักฐานจาก DB: ดู "เก็บผลลงรายงาน" ใน [`loadtest/README.md`](../loadtest/README.md)
 
@@ -333,7 +371,8 @@ already` เพราะแต่ละ pod เปิด connection pool ได�
 - **bid-worker ยัง scale ไม่ได้** (ตั้งใจ) — ความถูกต้องของการตัดสินบิดมาจาก consumer ตัวเดียวที่ทำงานทีละบิด
   ถ้าต้อง scale ในอนาคต แนวทางคือให้ worker หลายตัวแบ่ง Kafka partition กัน (key = `item_id` จึงยังเรียงลำดับ
   ต่อ item ได้) แต่ lifecycle (เปิด/ปิดการประมูล) ต้องมี leader election ก่อน
-- Postgres, Redis, Kafka เป็นตัวเดียว (ไม่มี replica) เหมือน compose
+- Postgres, Redis เป็นตัวเดียว (ไม่มี replica) เหมือน compose; Kafka 3 broker แต่ทั้งหมดอยู่บน node เดียว
+  เครื่องดับ = ทุกอย่างหยุด (ข้อมูลไม่หาย) HA จริงต้องใช้ cluster หลาย node
 - pgAdmin ยังไม่ได้ย้ายมา K8s — ดู database ด้วย `kubectl -n auction exec postgres-0 -- psql -U auction`
 - ยังไม่มี exporter ของ Postgres/Redis/Kafka (Grafana เห็นแค่ metric ของแอป) เช่นจำนวน connection
   ของ Postgres ยังต้องดูด้วย `psql` (คำสั่งในหัวข้อ "Scale อะไรบ้าง")

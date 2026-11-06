@@ -115,21 +115,24 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 			// leaving the group) Kafka holds the partitions for the old
 			// member until its session expires - with the 30s default, no
 			// bid was adjudicated for ~25s after Kafka was back (TC-10).
-			// Heartbeats (every 1s) keep a live worker well inside this.
+			// Heartbeats (every 0.5s) keep a live worker well inside this.
 			//
-			// 3s: kafka-go rejoins after a broker restart under a new member
-			// id, and the coordinator then waits for the old id's session to
-			// expire before handing out partitions - 10s here made TC-10
-			// recover in ~15s even with the broker up after ~5s. Needs the
-			// broker's group.min.session.timeout.ms lowered (default 6s; set
-			// to 1s in compose and k8s).
-			SessionTimeout:   3 * time.Second,
+			// 2s: kafka-go rejoins after losing its coordinator (a broker
+			// restart, or the coordinator's broker dying - TC-16) under a new
+			// member id, and the coordinator then waits for the old id's
+			// session to expire before handing out partitions. 10s here made
+			// TC-10 recover in ~15s even with the broker up after ~5s; 3s
+			// still left bidding stalled 3s after a broker failover. Needs
+			// the broker's group.min.session.timeout.ms lowered (default 6s;
+			// set to 1s in compose and k8s). A worker that misses heartbeats
+			// for 2s (it can't on a healthy node) only costs a rebalance and
+			// a replay, which request_id makes harmless.
+			SessionTimeout:   2 * time.Second,
 			RebalanceTimeout: 5 * time.Second,
-			// After losing the group coordinator (its broker restarted or
-			// died), rejoin within half a second rather than the default 5s,
-			// and notice sooner that it is gone.
+			// After losing the group coordinator, rejoin within half a second
+			// rather than the default 5s, and notice sooner that it is gone.
 			JoinGroupBackoff:  500 * time.Millisecond,
-			HeartbeatInterval: time.Second,
+			HeartbeatInterval: 500 * time.Millisecond,
 		}),
 	}
 }

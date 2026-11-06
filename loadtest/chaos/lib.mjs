@@ -4,13 +4,15 @@
 // TARGET=k8s runs them against the Kubernetes deployment in k8s/ (namespace
 // "auction") instead of the docker compose stack: database cleanup goes
 // through kubectl exec, and the tests scale/kill pods instead of containers.
-import { execFileSync, execSync, spawn } from "node:child_process";
+import { execFile, execFileSync, execSync, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 export const COMPOSE_FILE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../deploy/docker-compose.yml");
 export const K8S = process.env.TARGET === "k8s";
 const NS = process.env.K8S_NAMESPACE || "auction";
+const execFileAsync = promisify(execFile);
 
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -81,16 +83,18 @@ export function redisCli(...args) {
 // down and bring it back with its data: docker compose stop/start, or on
 // Kubernetes scaling its StatefulSet to 0 and back to 1 (the PVC survives).
 // Override with STOP_CMD / START_CMD.
+// On Kubernetes Kafka runs 3 brokers (k8s/kafka.yaml); stopping it stops all.
+const K8S_REPLICAS = { kafka: Number(process.env.KAFKA_REPLICAS || 3) };
 export function stopService(name) {
   if (process.env.STOP_CMD) return runCmd(process.env.STOP_CMD);
   if (!K8S) return compose("stop", name);
   kubectl("scale", "statefulset", name, "--replicas=0");
-  try { kubectl("wait", "--for=delete", `pod/${name}-0`, "--timeout=90s"); } catch { /* already gone */ }
+  try { kubectl("wait", "--for=delete", "pod", "-l", `app=${name}`, "--timeout=90s"); } catch { /* already gone */ }
 }
 export function startService(name) {
   if (process.env.START_CMD) return runCmd(process.env.START_CMD);
   if (!K8S) return compose("start", name);
-  kubectl("scale", "statefulset", name, "--replicas=1");
+  kubectl("scale", "statefulset", name, `--replicas=${K8S_REPLICAS[name] || 1}`);
 }
 
 // crashService kills a backing service's process with SIGKILL - no shutdown
@@ -100,7 +104,7 @@ export function startService(name) {
 // can't do this: the kubelet sends SIGTERM first, which Redis handles by
 // saving cleanly. Returns the exit code of the killed process (137 = SIGKILL).
 // Override with CRASH_CMD.
-export function crashService(name) {
+export function crashService(name, ordinal = 0) {
   if (process.env.CRASH_CMD) { runCmd(process.env.CRASH_CMD); return null; }
   if (!K8S) {
     compose("kill", "-s", "SIGKILL", name);
@@ -110,8 +114,8 @@ export function crashService(name) {
     return code;
   }
   // Docker Desktop's Kubernetes runs pod containers in its Docker engine.
-  const container = execFileSync("docker", ["ps", "-q", "--filter", `name=k8s_${name}_${name}-0_${NS}_`], { encoding: "utf8" }).trim().split("\n")[0];
-  if (!container) throw new Error(`no running Docker container for ${name}-0 (only Docker Desktop's Kubernetes is supported; set CRASH_CMD)`);
+  const container = execFileSync("docker", ["ps", "-q", "--filter", `name=k8s_${name}_${name}-${ordinal}_${NS}_`], { encoding: "utf8" }).trim().split("\n")[0];
+  if (!container) throw new Error(`no running Docker container for ${name}-${ordinal} (only Docker Desktop's Kubernetes is supported; set CRASH_CMD)`);
   execFileSync("docker", ["kill", "-s", "KILL", container], { stdio: "ignore" });
   return Number(execFileSync("docker", ["inspect", "-f", "{{.State.ExitCode}}", container], { encoding: "utf8" }).trim());
 }
@@ -126,6 +130,51 @@ export function stopWorker() {
 export function startWorker() {
   if (!K8S) return compose("start", "bid-worker");
   kubectl("scale", "deployment", "bid-worker", "--replicas=1");
+}
+
+// kafkaTopic describes bid-requests' partitions: { [partition]: { leader, isr } }
+// with broker ids (k8s pod kafka-N is broker N+1). Asks kafka-0, or any other
+// broker if that one is down.
+const TOPIC_ARGS = ["/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--describe", "--topic", "bid-requests"];
+export function kafkaTopic() {
+  let out = "";
+  for (const pod of K8S ? ["kafka-0", "kafka-1", "kafka-2"] : [null]) {
+    try { out = pod ? kubectl("exec", pod, "--", ...TOPIC_ARGS) : compose("exec", "-T", "kafka", ...TOPIC_ARGS); break; } catch { /* try the next one */ }
+  }
+  return parseTopic(out);
+}
+// kafkaTopicAsync is kafkaTopic without blocking the event loop (a test that
+// polls it while bidding must keep receiving WebSocket events on time),
+// asking only the given pod (Kubernetes).
+export async function kafkaTopicAsync(pod) {
+  const { stdout } = await execFileAsync("kubectl", ["-n", NS, "exec", pod, "--", ...TOPIC_ARGS], { encoding: "utf8" });
+  return parseTopic(stdout);
+}
+function parseTopic(out) {
+  const parts = {};
+  for (const m of out.matchAll(/Partition: (\d+)\s+Leader: (-?\d+)\s+Replicas: [\d,]+\s+Isr: ([\d,]*)/g)) {
+    parts[m[1]] = { leader: Number(m[2]), isr: m[3].split(",").filter(Boolean).map(Number) };
+  }
+  return parts;
+}
+
+// kafkaEndOffsets is the next offset of each bid-requests partition: { [partition]: n }.
+export function kafkaEndOffsets() {
+  const args = ["/opt/kafka/bin/kafka-get-offsets.sh", "--bootstrap-server", "localhost:9092", "--topic", "bid-requests"];
+  let out = "";
+  for (const pod of K8S ? ["kafka-0", "kafka-1", "kafka-2"] : [null]) {
+    try { out = pod ? kubectl("exec", pod, "--", ...args) : compose("exec", "-T", "kafka", ...args); break; } catch { /* try the next one */ }
+  }
+  return Object.fromEntries([...out.matchAll(/bid-requests:(\d+):(\d+)/g)].map((m) => [m[1], Number(m[2])]));
+}
+
+// partitionFor is the bid-requests partition an item's bids go to: kafka-go's
+// Hash balancer (FNV-1a of the key, as a signed 32-bit int, modulo the
+// partition count, sign dropped) - the same as Sarama's.
+export function partitionFor(key, partitions = 6) {
+  let h = 0x811c9dc5;
+  for (const b of Buffer.from(key)) { h ^= b; h = Math.imul(h, 0x01000193) >>> 0; }
+  return Math.abs((h | 0) % partitions);
 }
 
 // kafkaLag is how many bid-requests messages bid-worker has not committed

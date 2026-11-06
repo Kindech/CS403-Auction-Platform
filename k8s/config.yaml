@@ -7,7 +7,8 @@ metadata:
   name: backend-env
 data:
   REDIS_ADDR: redis:6379
-  KAFKA_BROKERS: kafka:9092
+  # All 3 brokers (k8s/kafka.yaml), so a client can still start while one is down.
+  KAFKA_BROKERS: kafka-0.kafka-headless:9092,kafka-1.kafka-headless:9092,kafka-2.kafka-headless:9092
   KAFKA_TOPIC: bid-requests
 ---
 # Dev values, same as compose's defaults. Replace both before running this

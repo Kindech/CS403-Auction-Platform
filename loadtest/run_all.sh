@@ -47,4 +47,10 @@ node chaos/tc14_deleted_item.mjs
 echo "### TC-15 Redis Crash"
 node chaos/tc15_redis_crash.mjs
 
+# TC-16 needs the 3-broker Kafka of k8s/ (compose runs one broker).
+if [ "${TARGET:-}" = "k8s" ]; then
+  echo "### TC-16 Kafka Broker Failover"
+  node chaos/tc16_kafka_broker_failover.mjs
+fi
+
 echo "All load/chaos tests passed."

@@ -1,4 +1,4 @@
-# Load & chaos tests
+﻿# Load & chaos tests
 
 ชุดทดสอบนี้ทำตาม test plan ในรายงาน (ตาราง 3.1, TC-01..TC-04) และเพิ่ม test ที่พิสูจน์สิ่งที่รายงาน
 กล่าวไว้ในส่วนอื่นแต่ตารางเดิมไม่มี scenario รองรับ:
@@ -20,13 +20,14 @@
 | TC-13 | Close With Backlog *(เพิ่ม)* | §3.1.1 — worker ตามงานไม่ทันตอนถึงเวลาปิด บิดที่ส่งทันเวลาต้องนับทุกตัว | node |
 | TC-14 | Deleted Item *(เพิ่ม)* | สินค้าถูกลบกลางการประมูล บิดของสินค้าอื่นยังบันทึกลง Postgres ได้ | node |
 | TC-15 | Redis Crash *(เพิ่ม)* | Redis ถูก kill -9 แล้วไม่เสียบิดที่ตอบรับไปแล้ว และถ้า state หาย/ล้าหลัง (เครื่องดับ) `bid-worker` ซ่อมจาก Postgres ก่อนบิดถัดไป | node |
+| TC-16 | Kafka Broker Failover *(เพิ่ม, เฉพาะ K8s)* | kill -9 broker ที่เป็น leader ของ partition ที่กำลังบิด → broker อื่นรับช่วง บิดต่อได้โดยไม่ต้องรอ broker ตัวนั้น restart ไม่มีบิดหาย/ซ้ำ | node |
 
 ## สิ่งที่ต้องมีก่อน
 
 - เปิด compose stack ไว้แล้ว: `cd ../deploy && docker compose up -d --build`
 - ติดตั้ง [k6](https://k6.io/) (หรือใช้ `docker run --rm -i grafana/k6 run - <script.js`)
-- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08 ถึง TC-15
-- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08 ถึง TC-15 สั่ง `docker compose` เพื่อ kill/เพิ่ม/หยุด
+- Node.js **22 ขึ้นไป** (ใช้ `WebSocket` และ `fetch` ที่มีในตัว) สำหรับ TC-06, TC-08 ถึง TC-16
+- Docker CLI ใช้งานได้จากเครื่อง (TC-06, TC-08 ถึง TC-16 สั่ง `docker compose` เพื่อ kill/เพิ่ม/หยุด
   container และลบข้อมูลทดสอบ)
 
 ทุกสคริปต์ใช้ `BASE_URL=http://localhost:8080` (nginx) เป็นค่าเริ่มต้น เปลี่ยนได้ด้วย
@@ -51,9 +52,10 @@ node chaos/tc12_redis_outage.mjs         # ~30 วินาที (หยุด 
 node chaos/tc13_close_with_backlog.mjs   # ~45 วินาที (หยุด bid-worker จนเลยเวลาปิด)
 node chaos/tc14_deleted_item.mjs         # ~10 วินาที
 node chaos/tc15_redis_crash.mjs          # ~30 วินาที (kill -9 Redis แล้วจำลองข้อมูลหาย)
+TARGET=k8s node chaos/tc16_kafka_broker_failover.mjs  # ~45 วินาที เฉพาะ K8s (kill -9 Kafka broker 1 ใน 3)
 ```
 
-หรือรันทั้งหมดด้วย `./run_all.sh` (หยุดทันทีที่ตัวไหน fail)
+หรือรันทั้งหมดด้วย `./run_all.sh` (หยุดทันทีที่ตัวไหน fail; TC-16 รันเฉพาะเมื่อ `TARGET=k8s`)
 
 ### Resilience demo (สำหรับนำเสนอ)
 
@@ -181,6 +183,13 @@ join ใหม่ ลด `SessionTimeout` ของ reader เหลือ 10 �
 13.8 วินาทีหลังเปิด Kafka, Postgres 7/7 ไม่ซ้ำ, viewer 20/20 Kubernetes — ผลเหมือนกัน กลับมาใน 18.3
 วินาที (pod ของ Kafka boot ช้ากว่า)
 
+**ทำให้เร็วขึ้น (7 พ.ย. 2026):** วัดแล้ว broker พร้อมใช้ ~3.5 วินาทีหลัง start เวลาที่เหลือเป็นการรอตายตัว
+ได้แก่ readiness probe ของ K8s (เช็กครั้งแรกหลัง 10 วินาที ทุก 10 วินาที → เปลี่ยนเป็น `tcpSocket` ทุก 1 วินาที),
+backoff ของ `bid-worker` (สูงสุด 10 → 1 วินาที), consumer session (10 → 2 วินาที พร้อมลด
+`group.min.session.timeout.ms` ของ broker เป็น 1 วินาที), `group.initial.rebalance.delay.ms` (3 → 0) และ
+metadata cache ของ producer (6 → 1 วินาที) ผล Kubernetes: **18.7 → 7.7 วินาที** ทั้งตอน Kafka เป็น broker เดียว
+และเป็น cluster 3 broker (TC-10 หยุดทั้ง 3 ตัวพร้อมกัน) ไม่มีบิดหาย/ซ้ำเหมือนเดิม
+
 ## TC-11 Postgres Outage — ทำอะไรบ้าง
 
 1. สร้าง user ทดสอบ 2 คนและสินค้า 1 ชิ้น ต่อ viewer 20 คน + bidder 1 คน
@@ -247,6 +256,33 @@ TC-12 หยุด Redis แบบปกติ (Redis ได้ save ก่อ�
 ผลบน Kubernetes (7 พ.ย. 2026): exit code 137, ไม่มีบิดหาย (ราคาหลัง kill = บิดสุดท้าย), บิดได้อีกครั้ง 0.8–1.9 วินาที
 หลัง Redis ตอบ, ซ่อม state ที่ล้าหลังใน 0.7–1.0 วินาที, สร้าง key ที่หายใหม่ใน 0.4 วินาที, Postgres 7/7 ไม่ซ้ำ
 
+## TC-16 Kafka Broker Failover — ทำอะไรบ้าง (เฉพาะ Kubernetes)
+
+TC-10 หยุด Kafka ทั้งหมด การบิดจึงต้องรอ broker เปิดใหม่ test นี้ฆ่า broker แค่ตัวเดียวจาก 3 ตัว
+(`k8s/kafka.yaml`: replication factor 3, `min.insync.replicas=2`, producer `acks=all`)
+
+1. รอจนทุก partition มี replica ครบ 3 ตัวใน ISR (broker ที่เพิ่ง restart อาจยังตามไม่ทัน)
+2. สร้าง user ทดสอบ 2 คนและสินค้า 1 ชิ้น ต่อ viewer 10 คน + bidder 1 คน บิด 3 ครั้ง แล้วหาว่าบิดของสินค้านี้
+   ไป partition ไหน (จาก offset ที่เพิ่ม และตรวจกับ hash ของ key แบบ kafka-go) และ broker ไหนเป็น leader
+3. **ส่ง SIGKILL ให้ broker ที่เป็น leader** (`docker kill -s KILL` ที่ container ของ pod นั้น) แล้วบิดต่อทีละครั้ง
+   15 วินาที (`RUN_MS`) ระหว่างนั้นถาม broker ที่เหลือว่าใครเป็น leader ใหม่
+4. ตรวจว่า:
+   - broker อื่นรับช่วง partition นั้น และบิดผ่านอีกครั้ง**ก่อน**ที่ broker ที่ตายจะ restart เสร็จ
+   - ทุกบิดได้คำตอบ, บิดที่ได้ `service_unavailable` (ถ้ามี) ไม่ถูกรับทีหลัง
+   - Postgres มีบิดที่รับตรงกับที่ bidder เห็น ไม่ซ้ำ, Redis = บิดสุดท้าย, viewer ทุกคนเห็นทุกราคาเรียงถูก
+   - broker ที่ตายกลับมาเองและตามข้อมูลทันจน ISR ครบ 3 อีกครั้ง
+5. ลบข้อมูลทดสอบ
+
+ผล (7 พ.ย. 2026, 9 รอบ): leader ใหม่ใน ~1.5–1.7 วินาที, บิดแรกหลัง kill ผ่านใน **4–6 วินาที** ในรอบส่วนใหญ่
+(บิดนั้นแค่ได้คำตอบช้า ไม่ได้ถูกปฏิเสธ), หลังจากนั้นช้าสุด ~20ms, broker กลับมา sync ใน ~20 วินาที,
+**ไม่มีบิดหายหรือซ้ำทุกรอบ** (log ของ worker มี "replayed bid already applied" = บิดที่ถูกส่งซ้ำหลัง failover
+ถูก `request_id` กันไว้) หนึ่งรอบช้าถึง 13.6 วินาที: ฝั่ง broker ย้าย leader เสร็จใน ~1.6 วินาทีเหมือนรอบอื่น
+แต่ kafka-go ใน `bid-worker` ยังพยายามต่อ `kafka-0` ที่ตายจนมันกลับมา
+
+ช่วงเวลาที่ใช้ (ระหว่างพัฒนา): ตรวจพบ broker ตาย 9 → 1.5 วินาที (`broker.session.timeout.ms`), เลือก controller
+ใหม่เมื่อตัวที่ตายเป็น controller (`controller.quorum.fetch.timeout.ms` 2 → 1 วินาที, election backoff ≤ 0.3
+วินาทีหลังโหวตแตก) และ consumer กลับเข้า group ที่ coordinator ย้ายไป (session 3 → 2 วินาที) ลดจาก ~8–10 เหลือ 4–6 วินาที
+
 ## TC-13 Close With Backlog — ทำอะไรบ้าง
 
 1. สร้างสินค้า 8 ชิ้นที่จบใน 25 วินาที และอีก 1 ชิ้นที่ไม่มีคนบิด
@@ -275,7 +311,7 @@ close marker ที่อยู่ใน Kafka partition เดียวกั�
 **ปัญหาที่ test นี้เจอ (แก้แล้ว):** INSERT ชน foreign key แล้ว `bid-worker` retry batch นั้นไม่หยุด ทำให้บิดของ
 **ทุกสินค้า** ไม่ถูกบันทึกอีกเลย แม้ restart worker ก็ไม่หาย เพราะ Kafka ส่ง batch เดิมซ้ำ
 
-### ใช้ TC-06, TC-08 ถึง TC-15 กับ Kubernetes
+### ใช้ TC-06, TC-08 ถึง TC-16 กับ Kubernetes
 
 ตั้ง `TARGET=k8s` แล้วสคริปต์จะทำงานกับ deployment ใน `k8s/` (namespace `auction`) แทน compose:
 
@@ -291,7 +327,8 @@ $env:TARGET="k8s"; node chaos/tc09_api_failover.mjs
 - TC-09: force-delete api-server pod ที่เก่าที่สุด แล้วตรวจเพิ่มว่า Kubernetes สร้าง pod มาแทนเอง
 - TC-06: force-delete pod ของ `bid-worker` แล้วให้ Kubernetes สร้างตัวใหม่เอง
 - TC-10 / TC-11 / TC-12: หยุด Kafka / Postgres / Redis ด้วย `kubectl scale statefulset <ชื่อ> --replicas=0`
-  แล้วเปิดกลับด้วย `--replicas=1` (ข้อมูลอยู่ใน PVC ไม่หาย)
+  แล้วเปิดกลับด้วยจำนวนเดิม (Kafka 3 ตัว เปลี่ยนได้ด้วย `KAFKA_REPLICAS`, ที่เหลือ 1) ข้อมูลอยู่ใน PVC ไม่หาย
+- TC-16: `docker kill -s KILL` container ของ broker ที่เป็น leader แล้วปล่อยให้ Kubernetes restart เอง
 - TC-13: หยุด `bid-worker` ด้วย `kubectl scale deployment bid-worker --replicas=0`
 - การลบข้อมูลทดสอบใช้ `kubectl exec postgres-0` / `redis-0` แทน `docker compose exec`
 
@@ -311,7 +348,7 @@ HPA บน Kubernetes (`k8s\run-k6.ps1 -Script hpa_autoscale_load.js`) ดู `k
 
 ## การลบข้อมูลทดสอบ
 
-TC-08 ถึง TC-15 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
+TC-08 ถึง TC-16 สร้าง user (`*@chaos.local`) และสินค้าของตัวเอง แล้ว**ลบทิ้งเองตอนจบ** ทั้งใน
 Postgres (`audit_log`, `bids`, `items`, `users`) และ key ใน Redis ก่อนลบจะรอให้ `bid-worker`
 เขียนแถว `bids` ของสินค้านั้นลง Postgres ครบก่อน เพื่อไม่ให้เหลือแถว `bid.dropped` ค้างใน `audit_log`
 
@@ -331,7 +368,7 @@ FROM users WHERE email LIKE '%@loadtest.local' GROUP BY 1;
 - TC-02/TC-04/TC-05/TC-07 ตรวจจริงผ่าน `check()` ใน `default`/`teardown` — ถ้าต้องการรู้ว่า fail
   ตรงไหน ให้ดู console output รอบ ๆ `"exactly 1 bid was accepted"` เป็นต้น
 - TC-06 เป็น bash script พิมพ์ `PASS`/`FAIL` และ exit 0/1 ตามนั้น เปิด `bid-worker` กลับให้เสมอ
-- TC-08 ถึง TC-15 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
+- TC-08 ถึง TC-16 พิมพ์ `PASS`/`FAIL` ทีละข้อ แล้วสรุปบรรทัดสุดท้าย exit 0/1 ตามนั้น
 - `k8s\run-k6.ps1` พิมพ์ `PASS`/`FAIL` และ exit 0/1 ตามผลของ k6
 
 ## ปรับค่า

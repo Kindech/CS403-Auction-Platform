@@ -72,7 +72,9 @@ TC-11
 จะตอบ `service_unavailable` และ broker ถูกตั้งให้ปฏิเสธบิดที่มาถึงช้ากว่า 2.5 วินาทีนับจากเวลาที่บิด
 (`models.BidExpiry` → topic config `message.timestamp.before.max.ms`, api-server ตั้งให้ตอน start)
 เพราะ Kafka client ยัง retry ข้อความเองต่อหลัง api-server เลิกรอ ถ้าไม่มีกฎนี้ บิดที่ผู้ใช้ถูกบอกว่า
-"ไม่ถูกบันทึก" จะเข้าระบบทีหลังตอน Kafka กลับมาได้ — ทดสอบด้วย TC-10
+"ไม่ถูกบันทึก" จะเข้าระบบทีหลังตอน Kafka กลับมาได้ — ทดสอบด้วย TC-10 บน Kubernetes Kafka เป็น
+cluster 3 broker (KRaft) broker ตาย 1 ตัวบิดยังผ่านต่อได้โดยไม่ต้องรอมัน restart — ดู
+[Kafka: กลับมาเร็วหลัง restart และ 3 broker](#kafka-กลับมาเร็วหลัง-restart-และ-3-broker-บน-kubernetes) และ TC-16
 
 **ถ้า Redis ล่ม ผู้ใช้ก็รู้ทันที:** `bid-worker` ต้องใช้ Redis ทั้งตัดสินบิดและแจ้งผล api-server จึงเช็ก Redis
 อยู่ตลอดทุก 0.5 วินาที (`Deps.WatchRedis`) และตอบ `service_unavailable` ทันทีโดยไม่ส่งบิดเข้า Kafka ช่วงแรก
@@ -344,6 +346,68 @@ kubectl -n auction exec redis-0 -- redis-cli HGET item:<item-id>:state price
 kubectl -n auction logs deploy/bid-worker --tail=5
 ```
 
+## Kafka: กลับมาเร็วหลัง restart และ 3 broker บน Kubernetes
+
+**ทำไม Kafka ทำเป็น cluster 3 broker แต่ Redis ไม่ทำ replica/Sentinel** — ทั้งหมดรันบนเครื่องเดียว
+(Docker Desktop) จึงมีความเสียหายอยู่ 2 แบบ:
+
+| เหตุการณ์ | Redis replica + Sentinel | Kafka 3 broker |
+|---|---|---|
+| process ตาย (crash, OOM, kill -9) | ไม่ช่วยมาก: Redis เปิดใหม่ในไม่ถึง 1 วินาที และ AOF ไม่เสียบิดที่ตอบรับแล้ว (TC-15) การรอ Sentinel ตรวจพบและสลับ master ใช้เวลาพอ ๆ กันหรือนานกว่า | **ช่วยจริง:** broker เป็น JVM เปิดใหม่ช้า (~5–8 วินาที รวม consumer กลับเข้า group) ส่วน follower ที่มีข้อมูลครบอยู่แล้วรับช่วงเป็น leader ได้ใน ~1.5 วินาที |
+| เครื่องดับ | ไม่ช่วย: replica อยู่บนเครื่องเดียวกัน ดับพร้อมกัน | ไม่ช่วยเหมือนกัน |
+
+สรุป: บนเครื่องเดียวระบบรับประกัน**ข้อมูลไม่หาย** (AOF + reconcile จาก Postgres, Kafka acks=all,
+idempotent `request_id`) แต่ถ้าเครื่องดับ**บริการหยุด**จนเครื่องกลับมา High availability จริง
+(สลับไปเครื่องอื่นได้) ต้องใช้ cluster หลาย node ซึ่งอยู่ในแนวทางพัฒนาต่อของรายงาน (หัวข้อ 5.4)
+
+**ทำไมใช้ KRaft ไม่ใช่ ZooKeeper** — Kafka แบบเก่าใช้ ZooKeeper เก็บ metadata และเลือก controller
+ZooKeeper ถูก deprecate ตั้งแต่ Kafka 3.5 และถูกถอดออกใน 4.0 แทนด้วย KRaft (controller เลือกกันเองด้วย
+Raft ใน process ของ Kafka) ระบบนี้ใช้ KRaft มาตั้งแต่แรก (`apache/kafka:3.7.1`) จึงไม่ต้องรัน ZooKeeper
+แยก ทำให้มี process ที่ต้องดูแลน้อยลงและเลือก controller ใหม่ได้เร็วกว่า
+
+**ขั้น A — ตัดเวลารอที่ไม่จำเป็นตอน broker restart** (TC-10 จาก 18.7 → **7.7 วินาที**) วัดแล้วพบว่า broker
+พร้อมใช้ ~3.5 วินาทีหลัง start แต่เวลาที่เหลือเป็นการรอตายตัว:
+
+| จุดที่รอ | ก่อน | หลัง |
+|---|---|---|
+| readiness probe ของ Kafka (K8s) | เริ่มเช็กหลัง 10 วินาที ทุก 10 วินาที ด้วยคำสั่ง JVM → Ready ที่ 14.1 วินาที | `tcpSocket` 9092 ทุก 1 วินาที |
+| backoff ของ `bid-worker` ตอน fetch ล้มเหลว | สูงสุด 10 วินาที | สูงสุด 1 วินาที (`fetchBackoffMax`) |
+| consumer session (รอ member id เก่าหมดอายุก่อนแจก partition) | 10 วินาที (broker บังคับขั้นต่ำ 6) | 2 วินาที + `group.min.session.timeout.ms=1000` |
+| `group.initial.rebalance.delay.ms` (รอ member อื่น) | 3 วินาที | 0 (มี bid-worker ตัวเดียว) |
+| producer metadata cache | 6 วินาที | 1 วินาที (`MetadataTTL`) |
+
+**ขั้น B — Kafka 3 broker (เฉพาะ Kubernetes, `k8s/kafka.yaml`)** ทุก node เป็นทั้ง broker และ controller
+replication factor 3, `min.insync.replicas=2`, producer ใช้ `acks=all` → บิดนับว่ารับแล้วเมื่อมีอย่างน้อย
+2 broker เก็บไว้ เสีย broker 1 ตัวจึงไม่เสียบิด (ถ้าเสีย 2 ตัวพร้อมกัน Kafka จะปฏิเสธการเขียน ผู้บิดได้
+`service_unavailable` แทนการรับบิดที่อาจหาย) และ `unclean.leader.election=false` ไม่ยก replica ที่ข้อมูล
+ไม่ครบเป็น leader ตั้งให้ตรวจพบ broker ตายใน 1.5 วินาที (`broker.session.timeout.ms`, ค่าเดิม 9 วินาที)
+ผล TC-16 (kill -9 broker ที่เป็น leader ของ partition ที่กำลังบิด): leader ใหม่ใน ~1.7 วินาที บิดผ่านอีกครั้ง
+ใน **4–6 วินาที** (ส่วนใหญ่เป็นเวลาที่ consumer กลับเข้า group ที่ coordinator ย้ายไป broker อื่น)
+ระหว่างนั้นบิดไม่ได้ถูกปฏิเสธ แค่ได้คำตอบช้าลง ไม่มีบิดหายหรือซ้ำ broker ที่ตายกลับมา sync เองใน ~20 วินาที
+มีบางรอบ (1 ใน 9 รอบที่วัด) ที่ช้าถึง ~13 วินาที: log ฝั่ง broker ย้าย leader เสร็จใน ~1.6 วินาทีเหมือนเดิม
+แต่ client (kafka-go) ยังพยายามต่อ broker ที่ตายจนมันกลับมา ข้อมูลยังครบทุกรอบ compose ยังเป็น broker เดียว
+(ใช้ค่าของขั้น A)
+
+**ทดสอบเอง:**
+```bash
+cd loadtest
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc16_kafka_broker_failover.mjs
+```
+```powershell
+$env:TARGET="k8s"; node chaos/tc10_kafka_restart.mjs
+```
+หรือด้วยมือ: ดูว่า broker ไหนเป็น leader ของแต่ละ partition แล้ว kill ตัวหนึ่งระหว่างบิดในหน้าเว็บ
+```bash
+kubectl -n auction exec kafka-1 -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --describe --topic bid-requests
+```
+```powershell
+docker kill -s KILL (docker ps -q --filter "name=k8s_kafka_kafka-0_auction_")
+```
+รันคำสั่งแรกซ้ำ: partition ที่ kafka-0 (broker 1) เคยนำจะย้ายไป broker อื่น `Isr` เหลือ 2 ตัว
+และกลับเป็น 3 ตัวเมื่อ kafka-0 restart เสร็จ ระหว่างนั้นบิดในหน้าเว็บยังผ่าน
+
 ## พัฒนา Backend
 
 ```bash
@@ -405,7 +469,8 @@ npm test      # กฎราคาขั้นต่ำ, จำนวนเง�
 `loadtest/` ทำตาม test plan ในรายงาน (TC-01..TC-04) และเพิ่มอีก 10 test เพื่อพิสูจน์สิ่งที่รายงาน
 กล่าวไว้ในส่วนอื่นแต่ตารางไม่มี scenario (TC-05 soft-close extension, TC-06 worker crash/replay,
 TC-07 reconnect resync, TC-08 scale-out fan-out, TC-09 api-server failover, TC-10 Kafka restart,
-TC-11 Postgres outage, TC-12 Redis outage, TC-13 ปิดประมูลตอนมีบิดค้างในคิว, TC-14 สินค้าถูกลบกลางการประมูล, TC-15 Redis ถูก kill -9 / ข้อมูลหาย)
+TC-11 Postgres outage, TC-12 Redis outage, TC-13 ปิดประมูลตอนมีบิดค้างในคิว, TC-14 สินค้าถูกลบกลางการประมูล, TC-15 Redis ถูก kill -9 / ข้อมูลหาย,
+TC-16 Kafka broker ตาย 1 ตัว — เฉพาะ K8s)
 รายละเอียดแต่ละตัว และวิธีอ่านผลอยู่ใน `loadtest/README.md`
 
 ทดสอบการ scale และ failover ของ api-server ได้เองด้วยคำสั่งเดียว (Node.js 22+, เปิด stack ไว้แล้ว):
@@ -433,7 +498,7 @@ node chaos/tc14_deleted_item.mjs      # ลบสินค้าที่กำ�
 ลองเองผ่านหน้าเว็บก็ได้: เปิดหน้าประมูลไว้แล้ว `docker compose -f deploy/docker-compose.yml stop postgres`
 → บิดต่อได้ปกติ → `start postgres` แล้วดูใน pgAdmin ว่าบิดระหว่างนั้นอยู่ใน `bids` และ `audit_log` ครบ
 หรือ `stop kafka` → บิดแล้วจะได้ป๊อปอัป "ระบบขัดข้องชั่วคราว การเสนอราคานี้ไม่ถูกบันทึก" → `start kafka`
-แล้วรอ ~15 วินาที ราคาจะไม่เปลี่ยนจากบิดที่ถูกปฏิเสธไป และบิดใหม่ผ่านตามปกติ
+แล้วรอ ~10 วินาที ราคาจะไม่เปลี่ยนจากบิดที่ถูกปฏิเสธไป และบิดใหม่ผ่านตามปกติ
 
 ```bash
 cd loadtest
