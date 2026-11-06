@@ -45,15 +45,26 @@ spec:
             - { name: KAFKA_LOG_DIRS, value: "/var/lib/kafka/data" }
             - { name: KAFKA_HEAP_OPTS, value: "-Xms256m -Xmx512m" }
             - { name: CLUSTER_ID, value: "MkU3OEVBNTcwNTJENDM2Qk" }
+            # bid-worker's consumer uses a 3s session (backend/internal/kafkabus)
+            # so it gets its partitions back within seconds of a broker
+            # restart; the broker refuses sessions under 6s unless told
+            # otherwise. And there is only ever one bid-worker, so don't wait
+            # the default 3s for more members to join.
+            - { name: KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS, value: "1000" }
+            - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
           ports:
             - containerPort: 9092
             - containerPort: 9093
+          # The Service only routes to a Ready pod. This used to wait 10s
+          # before its first check and then check every 10s with a command
+          # that starts a JVM, so the broker sat up but unreachable for ~10s
+          # of every restart (measured: up 3.5s after start, Ready 14.1s).
+          # The broker opens 9092 only once it has started.
           readinessProbe:
-            exec:
-              command: ["sh", "-c", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 10
+            tcpSocket:
+              port: 9092
+            periodSeconds: 1
+            failureThreshold: 2
           resources:
             requests: { cpu: 200m, memory: 512Mi }
             limits: { memory: 1Gi }

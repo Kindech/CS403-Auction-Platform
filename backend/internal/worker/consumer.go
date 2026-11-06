@@ -133,8 +133,14 @@ func (w *Worker) Run(ctx context.Context) {
 // restarting, network blip) is retried with backoff - it used to end this
 // goroutine, after which the worker looked healthy but never processed
 // another bid. Decode errors are passed on so the bad message gets skipped.
+//
+// The backoff stops at fetchBackoffMax: it used to double up to 10s, so a
+// broker that came back during a long wait sat unused for up to 10s more
+// (TC-10). One retry a second costs nothing against our own Kafka.
+const fetchBackoffMax = time.Second
+
 func (w *Worker) fetchLoop(ctx context.Context, msgCh chan<- fetchResult) {
-	backoff := 500 * time.Millisecond
+	backoff := 200 * time.Millisecond
 	for {
 		req, msg, err := w.consumer.ReadBid(ctx)
 		if ctx.Err() != nil {
@@ -147,10 +153,10 @@ func (w *Worker) fetchLoop(ctx context.Context, msgCh chan<- fetchResult) {
 			case <-ctx.Done():
 				return
 			}
-			backoff = min(backoff*2, 10*time.Second)
+			backoff = min(backoff*2, fetchBackoffMax)
 			continue
 		}
-		backoff = 500 * time.Millisecond
+		backoff = 200 * time.Millisecond
 		select {
 		case msgCh <- fetchResult{req, msg, err}:
 		case <-ctx.Done():

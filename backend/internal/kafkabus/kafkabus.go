@@ -22,11 +22,20 @@ type Producer struct {
 func NewProducer(brokers []string, topic string) *Producer {
 	return &Producer{
 		writer: &kafka.Writer{
-			Addr:         kafka.TCP(brokers...),
-			Topic:        topic,
-			Balancer:     &kafka.Hash{}, // same key -> same partition, always
-			RequiredAcks: kafka.RequireOne,
+			Addr:     kafka.TCP(brokers...),
+			Topic:    topic,
+			Balancer: &kafka.Hash{}, // same key -> same partition, always
+			// A bid counts as taken only once every in-sync replica has it, so
+			// losing the partition leader right after can't lose it: the
+			// replica that takes over already holds it (k8s runs 3 brokers
+			// with min.insync.replicas=2; with one broker this is just that
+			// broker).
+			RequiredAcks: kafka.RequireAll,
 			BatchTimeout: 10 * time.Millisecond,
+			// Which broker leads each partition is cached; when a broker dies
+			// and another takes over, refetch it within a second instead of
+			// the default 6s.
+			Transport: &kafka.Transport{MetadataTTL: time.Second},
 		},
 	}
 }
@@ -106,9 +115,21 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 			// leaving the group) Kafka holds the partitions for the old
 			// member until its session expires - with the 30s default, no
 			// bid was adjudicated for ~25s after Kafka was back (TC-10).
-			// Heartbeats (every 3s) keep a live worker well inside this.
-			SessionTimeout:   10 * time.Second,
-			RebalanceTimeout: 10 * time.Second,
+			// Heartbeats (every 1s) keep a live worker well inside this.
+			//
+			// 3s: kafka-go rejoins after a broker restart under a new member
+			// id, and the coordinator then waits for the old id's session to
+			// expire before handing out partitions - 10s here made TC-10
+			// recover in ~15s even with the broker up after ~5s. Needs the
+			// broker's group.min.session.timeout.ms lowered (default 6s; set
+			// to 1s in compose and k8s).
+			SessionTimeout:   3 * time.Second,
+			RebalanceTimeout: 5 * time.Second,
+			// After losing the group coordinator (its broker restarted or
+			// died), rejoin within half a second rather than the default 5s,
+			// and notice sooner that it is gone.
+			JoinGroupBackoff:  500 * time.Millisecond,
+			HeartbeatInterval: time.Second,
 		}),
 	}
 }

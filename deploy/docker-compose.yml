@@ -66,6 +66,12 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      # bid-worker's consumer uses a 3s session (backend/internal/kafkabus) so
+      # it gets its partitions back within seconds of a broker restart; the
+      # broker refuses sessions under 6s unless told otherwise. And there is
+      # only ever one bid-worker, so don't wait 3s for more members to join.
+      KAFKA_GROUP_MIN_SESSION_TIMEOUT_MS: 1000
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     ports:
       - "127.0.0.1:9092:9092" # this machine only: Kafka has no password
