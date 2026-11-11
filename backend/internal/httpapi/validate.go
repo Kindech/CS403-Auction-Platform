@@ -3,6 +3,7 @@ package httpapi
 import (
 	"net/mail"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -14,6 +15,7 @@ const (
 	maxTitleLen       = 200
 	maxDescriptionLen = 5000
 	maxImageURLLen    = 2048
+	maxImages         = 10
 	maxDisplayNameLen = 100
 	minPasswordLen    = 6
 	maxPasswordBytes  = 72 // bcrypt refuses anything longer
@@ -43,8 +45,13 @@ func validateItem(req createItemRequest, now time.Time) string {
 	if utf8.RuneCountInString(req.Description) > maxDescriptionLen {
 		return "description is too long (max 5000 characters)"
 	}
-	if !validImageURL(req.ImageURL) {
-		return "image_url must be an http(s) URL"
+	if len(req.ImageURLs) > maxImages {
+		return "at most 10 images per item"
+	}
+	for _, u := range req.ImageURLs {
+		if !validImageURL(u) {
+			return "image URLs must be uploaded images or http(s) URLs"
+		}
 	}
 	if !models.ValidBidAmount(req.StartingPrice) || !models.ValidBidAmount(req.BidIncrement) {
 		return "starting_price and bid_increment must be positive, at most 999,999,999,999.99, with at most 2 decimals"
@@ -58,13 +65,41 @@ func validateItem(req createItemRequest, now time.Time) string {
 	return ""
 }
 
+// uploadedImagePath matches what imagestore.Put returns, and nothing else
+// on this site (no "..", no query string).
+var uploadedImagePath = regexp.MustCompile(`^/images/items/[0-9a-f]{32}\.(jpg|png|webp|gif)$`)
+
+// validImageURL accepts a photo uploaded through /api/uploads/images or an
+// absolute http(s) URL (seed data and older clients link external photos).
 func validImageURL(raw string) bool {
-	if raw == "" {
-		return true
-	}
 	if len(raw) > maxImageURLLen {
 		return false
 	}
+	if uploadedImagePath.MatchString(raw) {
+		return true
+	}
 	u, err := url.Parse(raw)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// normalizeImageURLs merges the legacy single image_url into image_urls and
+// drops blanks, so the stored list is never NULL and never has "" in it.
+func normalizeImageURLs(single string, list []string) []string {
+	out := make([]string, 0, len(list)+1)
+	for _, u := range list {
+		if u = strings.TrimSpace(u); u != "" {
+			out = append(out, u)
+		}
+	}
+	if single = strings.TrimSpace(single); single != "" && len(out) == 0 {
+		out = append(out, single)
+	}
+	return out
+}
+
+func coverImage(urls []string) string {
+	if len(urls) == 0 {
+		return ""
+	}
+	return urls[0]
 }

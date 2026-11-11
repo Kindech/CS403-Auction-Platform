@@ -7,6 +7,7 @@
 | ไฟล์ | สิ่งที่สร้าง |
 |---|---|
 | `postgres.yaml`, `redis.yaml`, `kafka.yaml` | StatefulSet + PersistentVolumeClaim + Service (Kafka 3 broker KRaft + headless Service, และ Job `kafka-init` สร้าง topic 6 partition × 3 replica) |
+| `seaweedfs.yaml` + `seaweedfs-s3.json` | StatefulSet + PVC 2Gi + Service `seaweedfs:8333` เก็บรูปสินค้า (S3 API) ที่ api-server ทุก pod ใช้ร่วมกัน nginx เสิร์ฟที่ `/images/` (ดู README หลัก หัวข้อ "รูปสินค้า") |
 | `api-server.yaml` | Deployment + Service + **HPA** (min 2, max 6, เป้า CPU 50%) |
 | `bid-worker.yaml` | Deployment 1 pod เสมอ (`strategy: Recreate` — ห้ามมี worker สองตัวพร้อมกัน) |
 | `frontend.yaml` + `nginx.conf` | nginx เสิร์ฟหน้าเว็บและ proxy ไป Service `api-server` เปิดเป็น LoadBalancer ที่ `localhost:8080` |

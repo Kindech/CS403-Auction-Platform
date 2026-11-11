@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import type { Item } from "../types";
 import { ItemCard } from "../components/ItemCard";
+import { ImageUploader } from "../components/ImageUploader";
 
 function toLocalInputValue(d: Date): string {
   const pad = (n: number) => n.toString().padStart(2, "0");
@@ -15,6 +16,7 @@ export function SellerTools() {
   const [items, setItems] = useState<Item[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   const now = new Date();
   const inFiveMin = new Date(now.getTime() + 5 * 60 * 1000);
@@ -23,7 +25,7 @@ export function SellerTools() {
   const [form, setForm] = useState({
     title: "",
     description: "",
-    image_url: "",
+    image_urls: [] as string[],
     starting_price: 100,
     bid_increment: 10,
     start_time: toLocalInputValue(inFiveMin),
@@ -54,7 +56,7 @@ export function SellerTools() {
         start_time: new Date(form.start_time).toISOString(),
         end_time: new Date(form.end_time).toISOString(),
       });
-      setForm((f) => ({ ...f, title: "", description: "", image_url: "" }));
+      setForm((f) => ({ ...f, title: "", description: "", image_urls: [] }));
       await loadItems();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "ไม่สามารถลงรายการสินค้าได้");
@@ -87,11 +89,10 @@ export function SellerTools() {
             value={form.description}
             onChange={(e) => setForm({ ...form, description: e.target.value })}
           />
-          <input
-            className={inputCls}
-            placeholder="URL รูปภาพ"
-            value={form.image_url}
-            onChange={(e) => setForm({ ...form, image_url: e.target.value })}
+          <ImageUploader
+            urls={form.image_urls}
+            onChange={(image_urls) => setForm((f) => ({ ...f, image_urls }))}
+            onBusyChange={setUploading}
           />
           <div className="grid grid-cols-2 gap-3">
             <label className="text-xs uppercase tracking-wider text-ink-muted">
@@ -141,10 +142,10 @@ export function SellerTools() {
           </div>
           {error && <p className="text-red-600 text-sm">{error}</p>}
           <button
-            disabled={busy}
+            disabled={busy || uploading}
             className="rounded-full bg-gold text-ink hover:bg-gold-dark disabled:opacity-50 px-4 py-2.5 font-semibold text-sm mt-2 transition-colors"
           >
-            {busy ? "กำลังลงรายการ..." : "ลงประมูลสินค้า"}
+            {busy ? "กำลังลงรายการ..." : uploading ? "รอรูปอัปโหลดให้เสร็จ..." : "ลงประมูลสินค้า"}
           </button>
         </form>
 

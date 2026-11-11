@@ -13,10 +13,19 @@ resources:
   - postgres.yaml
   - redis.yaml
   - kafka.yaml
+  - seaweedfs.yaml
   - api-server.yaml
   - bid-worker.yaml
   - frontend.yaml
   - monitoring.yaml
+
+secretGenerator:
+  # SeaweedFS S3 identities: api-server's key (read/write) and anonymous
+  # read-only, which is what lets nginx serve /images/ without signing.
+  # A copy of deploy/seaweedfs/s3.json.
+  - name: seaweedfs-s3
+    files:
+      - s3.json=seaweedfs-s3.json
 
 configMapGenerator:
   - name: nginx-conf

@@ -35,8 +35,8 @@ decoupled และ event-sequenced ออกแบบมาให้รับ t
                     │              │    (at-least-once, replay ได้)
                     └───┬──────┬───┘
                   ┌─────▼─┐  ┌─▼──────────┐
-                  │ Redis │  │ PostgreSQL │
-                  │(state)│  │(audit log, │
+                  │ Redis │  │ PostgreSQL │     รูปสินค้า: api-* เขียนลง SeaweedFS (S3 API)
+                  │(state)│  │(audit log, │     nginx เสิร์ฟให้ browser ที่ /images/
                   │       │  │ users,     │
                   │       │  │ items)     │
                   └───────┘  └────────────┘
@@ -112,7 +112,7 @@ cluster 3 broker (KRaft) broker ตาย 1 ตัวบิดยังผ่า
 backend/            Go module: cmd/api-server, cmd/bid-worker, internal/*
   migrations/        Postgres schema + ข้อมูล demo
 frontend/            React + Vite + TypeScript + Tailwind SPA
-deploy/              docker-compose.yml, Dockerfiles, nginx.conf
+deploy/              docker-compose.yml, Dockerfiles, nginx.conf, seaweedfs/s3.json
 k8s/                 Kubernetes manifests (kustomize) + HPA, run-k6.ps1
 loadtest/            k6 + chaos scripts ตาม test plan ในรายงาน
 .github/workflows/   CI: go vet/build/test + frontend build ทุกครั้งที่ push
@@ -346,6 +346,60 @@ kubectl -n auction exec redis-0 -- redis-cli HGET item:<item-id>:state price
 kubectl -n auction logs deploy/bid-worker --tail=5
 ```
 
+## รูปสินค้า: หลายรูปต่อสินค้า อัปโหลดจากเครื่อง
+
+ผู้ขายเลือกรูปจากเครื่องได้ (กดเลือกหรือลากไฟล์มาวาง) สูงสุด **10 รูปต่อสินค้า** รูปละไม่เกิน **8 MB** (JPG, PNG,
+WebP, GIF) รูปแรกคือรูปปกที่แสดงบนการ์ดสินค้า กด "ตั้งเป็นรูปปก" ที่รูปอื่นเพื่อเปลี่ยนได้ ในหน้าประมูลจะเป็นแกลเลอรี
+ที่มีรูปย่อให้คลิกเปลี่ยน
+
+**ทำไมเก็บรูปใน object storage แทน disk ของ api-server:** api-server มี 2–6 pod ที่ HPA สร้างและลบได้ตลอดเวลา
+ถ้ารูปอยู่บน disk ของ pod ใด พอ pod นั้นถูกลบรูปก็หายไปด้วย และ pod อื่นก็มองไม่เห็นรูปนั้น ทุก pod จึงเขียนรูปลงที่
+เดียวกัน คือ **SeaweedFS** (`k8s/seaweedfs.yaml` และ service `seaweedfs` ใน compose) ซึ่งเป็น object storage ที่ใช้
+S3 API แบบเดียวกับ AWS S3 ส่วน nginx เสิร์ฟรูปให้ browser โดยตรงที่ `/images/...` โดยไม่ผ่าน api-server
+
+- **ทำไมใช้ SeaweedFS แทน MinIO:** MinIO เลิกเผยแพร่ Docker image แล้ว (`minio/minio` บน Docker Hub ได้ 404
+  และดึงจาก quay.io ไม่ได้) api-server ใช้ S3 client มาตรฐาน (`minio-go`) จึงย้ายไปใช้ MinIO ที่มีอยู่แล้วหรือ AWS S3
+  ได้โดยเปลี่ยนแค่ `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`
+- **ลำดับการทำงาน:** browser ส่งรูปทีละรูปไปที่ `POST /api/uploads/images` (ต้อง login) → api-server ตรวจชนิดไฟล์
+  จาก byte จริงของไฟล์ ไม่เชื่อนามสกุลหรือ header ที่ browser ส่งมา (ไฟล์ HTML ที่ตั้งชื่อเป็น .png จะได้ 415) และตั้ง
+  ชื่อไฟล์ใหม่แบบสุ่ม → คืน URL `/images/items/<สุ่ม>.jpg` → ตอนกดลงประมูล frontend ส่ง URL ทั้งหมดไปใน `image_urls`
+- **ความปลอดภัย:** bucket ให้คนทั่วไป*อ่าน*ไฟล์ได้อย่างเดียว list และเขียนไม่ได้ (`deploy/seaweedfs/s3.json`) nginx
+  ส่งต่อเฉพาะ GET และใส่ `X-Content-Type-Options: nosniff` ส่วน `image_urls` ตอนสร้างสินค้ารับเฉพาะ path ที่ได้จาก
+  การอัปโหลด หรือ URL แบบ http(s)
+- **ใช้กับของเดิมได้:** migration `0005_item_images.sql` เพิ่มคอลัมน์ `image_urls` และคัดลอก `image_url` เดิมเข้าไป
+  `image_url` ยังอยู่และเป็นรูปปกเสมอ client เก่าและ load test ที่ส่ง `image_url` ช่องเดียวจึงใช้ได้เหมือนเดิม
+- **ข้อจำกัด:** SeaweedFS มีตัวเดียวเหมือน Postgres และ Redis ถ้าล่ม รูปจะไม่ขึ้นและอัปโหลดไม่ได้ แต่การประมูลยังทำงาน
+  ปกติ รูปที่อัปโหลดแล้วแต่ไม่ได้กดลงประมูลจะค้างอยู่ใน bucket (ยังไม่มีงานลบรูปที่ไม่ได้ใช้)
+
+**วิธีทดสอบ**
+
+1. เข้า http://localhost:8080 ด้วย `seller@example.com` / `password123` แล้วไปที่เมนู "ลงประมูลสินค้า"
+2. กด "+ เพิ่มรูป" แล้วเลือกหลายรูปพร้อมกัน (หรือลากมาวาง) รูปจะขึ้นเป็นรูปย่อ ลองกด "ตั้งเป็นรูปปก" และกด × เพื่อลบรูป
+3. กดลงประมูล แล้วเปิดสินค้านั้น ต้องเห็นรูปปกเป็นรูปแรก มีรูปย่อด้านล่าง ปุ่ม ‹ › และตัวนับ "1 / 3"
+4. ทดสอบฝั่ง API ด้วย curl (Git Bash) โดยเอา token จากการ login มาใช้:
+   ```bash
+   TOKEN=$(curl -s localhost:8080/api/auth/login -H 'content-type: application/json' -d '{"email":"seller@example.com","password":"password123"}' | node -pe 'JSON.parse(require("fs").readFileSync(0)).token')
+   ```
+   ```bash
+   curl -s -w ' %{http_code}\n' -H "Authorization: Bearer $TOKEN" -F file=@photo.jpg localhost:8080/api/uploads/images
+   ```
+   ต้องได้ `{"url":"/images/items/....jpg"} 201` และเปิด URL นั้นใน browser ได้ ส่วนกรณีที่ต้องถูกปฏิเสธ:
+
+   | ส่งอะไร | ผลที่ต้องได้ |
+   |---|---|
+   | ไม่มี token | 401 |
+   | ไฟล์ที่ไม่ใช่รูป (เช่น HTML ที่ตั้งชื่อเป็น .png) | 415 |
+   | ไฟล์ใหญ่เกิน 8 MB | 413 |
+   | `curl -X PUT localhost:8080/images/items/x` | 403 |
+   | `curl localhost:8080/images/` (ขอรายชื่อไฟล์ทั้ง bucket) | 403 |
+   | สร้างสินค้าด้วย `"image_urls":["/api/me"]` | 400 |
+
+5. ดูว่า api-server ต่อ bucket ได้:
+   ```bash
+   kubectl -n auction logs deploy/api-server | grep images:
+   ```
+   ต้องเห็น `images: bucket item-images on seaweedfs:8333 ready`
+
 ## Kafka: กลับมาเร็วหลัง restart และ 3 broker บน Kubernetes
 
 **ทำไม Kafka ทำเป็น cluster 3 broker แต่ Redis ไม่ทำ replica/Sentinel** — ทั้งหมดรันบนเครื่องเดียว
@@ -552,7 +606,8 @@ GitHub ส่วน badge ด้านบนไฟล์นี้แสดงผ
 ## ค่าเริ่มต้นที่ใช้ได้เฉพาะในเครื่อง
 
 ระบบนี้ตั้งค่ามาให้รันบนเครื่องตัวเอง ก่อนเปิดให้เครื่องอื่นเข้าถึงต้องเปลี่ยน: `JWT_SECRET` (api-server จะเตือนใน
-log ถ้ายังเป็นค่าเริ่มต้น), รหัสผ่าน Postgres/Grafana/pgAdmin และ `CORS_ORIGIN`
+log ถ้ายังเป็นค่าเริ่มต้น), รหัสผ่าน Postgres/Grafana/pgAdmin, key ของ SeaweedFS (`deploy/seaweedfs/s3.json`, `k8s/seaweedfs-s3.json` และ
+`S3_ACCESS_KEY`/`S3_SECRET_KEY`) และ `CORS_ORIGIN`
 
 ## Kubernetes (local)
 

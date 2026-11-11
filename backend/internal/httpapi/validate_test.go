@@ -42,9 +42,21 @@ func TestValidateItem(t *testing.T) {
 		valid bool
 	}{
 		{"fine", func(*createItemRequest) {}, true},
-		{"no image", func(r *createItemRequest) { r.ImageURL = "" }, true},
-		{"https image", func(r *createItemRequest) { r.ImageURL = "https://example.com/a.png" }, true},
-		{"javascript image", func(r *createItemRequest) { r.ImageURL = "javascript:alert(1)" }, false},
+		{"no image", func(r *createItemRequest) { r.ImageURLs = nil }, true},
+		{"https image", func(r *createItemRequest) { r.ImageURLs = []string{"https://example.com/a.png"} }, true},
+		{"uploaded images", func(r *createItemRequest) {
+			r.ImageURLs = []string{"/images/items/0123456789abcdef0123456789abcdef.jpg", "/images/items/fedcba9876543210fedcba9876543210.webp"}
+		}, true},
+		{"javascript image", func(r *createItemRequest) { r.ImageURLs = []string{"javascript:alert(1)"} }, false},
+		{"relative path outside uploads", func(r *createItemRequest) { r.ImageURLs = []string{"/api/me"} }, false},
+		{"path traversal", func(r *createItemRequest) { r.ImageURLs = []string{"/images/items/../../api/me.jpg"} }, false},
+		{"svg upload name", func(r *createItemRequest) { r.ImageURLs = []string{"/images/items/0123456789abcdef0123456789abcdef.svg"} }, false},
+		{"too many images", func(r *createItemRequest) {
+			r.ImageURLs = make([]string, 11)
+			for i := range r.ImageURLs {
+				r.ImageURLs[i] = "https://example.com/a.png"
+			}
+		}, false},
 		{"empty title", func(r *createItemRequest) { r.Title = "" }, false},
 		{"huge title", func(r *createItemRequest) { r.Title = strings.Repeat("x", 201) }, false},
 		{"huge description", func(r *createItemRequest) { r.Description = strings.Repeat("x", 5001) }, false},
@@ -93,5 +105,25 @@ func TestRedactTokenFromLogs(t *testing.T) {
 	}
 	if token != "secret" {
 		t.Errorf("handler lost the token: %q", token)
+	}
+}
+
+func TestNormalizeImageURLs(t *testing.T) {
+	cases := []struct {
+		name   string
+		single string
+		list   []string
+		want   []string
+	}{
+		{"nothing", "", nil, []string{}},
+		{"legacy single", "https://x/a.png", nil, []string{"https://x/a.png"}},
+		{"list wins over single", "https://x/a.png", []string{"https://x/b.png"}, []string{"https://x/b.png"}},
+		{"blanks dropped", "", []string{" ", "https://x/b.png", ""}, []string{"https://x/b.png"}},
+	}
+	for _, c := range cases {
+		got := normalizeImageURLs(c.single, c.list)
+		if got == nil || strings.Join(got, ",") != strings.Join(c.want, ",") {
+			t.Errorf("%s: got %#v, want %#v", c.name, got, c.want)
+		}
 	}
 }

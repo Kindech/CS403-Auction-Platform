@@ -12,7 +12,8 @@ export interface Item {
   seller_name?: string;
   title: string;
   description: string;
-  image_url: string;
+  image_url: string; // cover photo
+  image_urls?: string[]; // all photos, cover first
   starting_price: number;
   bid_increment: number;
   current_price: number;
@@ -24,6 +25,13 @@ export interface Item {
   winner_name?: string;
   final_price?: number;
   created_at: string;
+}
+
+// All of an item's photos, cover first. Items created before multi-photo
+// support only have image_url.
+export function itemImages(item: Pick<Item, "image_url" | "image_urls">): string[] {
+  if (item.image_urls && item.image_urls.length > 0) return item.image_urls;
+  return item.image_url ? [item.image_url] : [];
 }
 
 export type BidStatus = "accepted" | "rejected";

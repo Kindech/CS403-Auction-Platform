@@ -3,7 +3,8 @@ import { useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuctionSocket } from "../lib/useAuctionSocket";
 import { useAuth } from "../lib/auth";
-import type { Bid, Item } from "../types";
+import { itemImages, type Bid, type Item } from "../types";
+import { ImageGallery } from "../components/ImageGallery";
 import { formatMoney, formatCountdown } from "../lib/format";
 import { isValidAmount, leadingBidId, minNextBid as nextBidFloor } from "../lib/bidding";
 import { WinnerAnnouncement } from "../components/WinnerAnnouncement";
@@ -158,14 +159,11 @@ export function AuctionRoom() {
     return (
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
         <div>
-          <div className="relative aspect-4/3 bg-paper rounded-xl overflow-hidden mb-4 border border-slate-100">
-            {item.image_url && (
-              <img src={item.image_url} alt={item.title} className="w-full h-full object-cover" />
-            )}
+          <ImageGallery images={itemImages(item)} alt={item.title}>
             <span className="absolute top-3 left-3 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border backdrop-blur-sm bg-blue-50 text-blue-700 border-blue-200">
               เร็วๆ นี้
             </span>
-          </div>
+          </ImageGallery>
           <h1 className="font-serif-display text-2xl font-bold text-ink">{item.title}</h1>
           <p className="text-ink-muted mt-2 text-sm">{item.description}</p>
           <p className="text-xs text-ink-muted/70 mt-3">ผู้ขาย: {item.seller_name}</p>
@@ -211,17 +209,14 @@ export function AuctionRoom() {
       {rejectPopup}
       {infoPopupEl}
       <div>
-        <div className="relative aspect-4/3 bg-paper rounded-xl overflow-hidden mb-4 border border-slate-100">
-          {item.image_url && (
-            <img src={item.image_url} alt={item.title} className="w-full h-full object-cover" />
-          )}
+        <ImageGallery images={itemImages(item)} alt={item.title}>
           {item.status === "live" && (
             <span className="absolute top-3 right-3 px-2 py-1 rounded-full bg-ink/80 text-cream text-[10px] backdrop-blur-sm flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-pulse" />
               LIVE
             </span>
           )}
-        </div>
+        </ImageGallery>
         <h1 className="font-serif-display text-2xl font-bold text-ink">{item.title}</h1>
         <p className="text-ink-muted mt-2 text-sm">{item.description}</p>
         <p className="text-xs text-ink-muted/70 mt-3">

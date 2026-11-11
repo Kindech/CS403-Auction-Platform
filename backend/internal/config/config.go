@@ -20,6 +20,12 @@ type Config struct {
 	HTTPAddr        string
 	BidRateLimitPerSec int
 	CORSOrigin      string
+	// Item photos (S3-compatible store, MinIO here). Uploads are off when
+	// S3Endpoint is empty.
+	S3Endpoint  string
+	S3AccessKey string
+	S3SecretKey string
+	S3Bucket    string
 
 	// bid-worker
 	KafkaGroupID       string
@@ -86,6 +92,10 @@ func Load() Config {
 		HTTPAddr:           getEnv("HTTP_ADDR", ":8080"),
 		BidRateLimitPerSec: getEnvInt("BID_RATE_LIMIT_PER_SEC", 10),
 		CORSOrigin:         getEnv("CORS_ORIGIN", "http://localhost:8080"),
+		S3Endpoint:         getEnv("S3_ENDPOINT", ""),
+		S3AccessKey:        getEnv("S3_ACCESS_KEY", ""),
+		S3SecretKey:        getEnv("S3_SECRET_KEY", ""),
+		S3Bucket:           getEnv("S3_BUCKET", "item-images"),
 
 		KafkaGroupID:       getEnv("KAFKA_GROUP_ID", "bid-worker"),
 		AntiSnipeWindow:    getEnvDuration("ANTI_SNIPE_WINDOW", 60*time.Second),

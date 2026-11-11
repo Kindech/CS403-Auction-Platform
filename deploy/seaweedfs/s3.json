@@ -1,0 +1,13 @@
+{
+  "identities": [
+    {
+      "name": "auction-api",
+      "credentials": [{ "accessKey": "auction", "secretKey": "auction-dev-secret" }],
+      "actions": ["Admin", "Read", "List", "Write", "Tagging"]
+    },
+    {
+      "name": "anonymous",
+      "actions": ["Read"]
+    }
+  ]
+}

@@ -53,3 +53,27 @@ export function wsURL(itemID: string): string {
   const token = getToken() ?? "";
   return `${proto}//${window.location.host}/ws/auctions/${itemID}?token=${encodeURIComponent(token)}`;
 }
+
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // api-server's imagestore.MaxBytes
+export const MAX_IMAGES = 10; // api-server's maxImages
+
+// Uploads one photo and returns the URL to put in an item's image_urls.
+// No Content-Type header: the browser sets the multipart boundary itself.
+export async function uploadImage(file: File): Promise<string> {
+  const form = new FormData();
+  form.append("file", file);
+  const headers: Record<string, string> = {};
+  const token = getToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch("/api/uploads/images", { method: "POST", headers, body: form });
+  if (!res.ok) {
+    let message = res.status === 413 ? "ไฟล์ใหญ่เกิน 8 MB" : res.statusText;
+    try {
+      message = (await res.json()).error ?? message;
+    } catch {
+      // nginx's own 413 page isn't JSON
+    }
+    throw new ApiError(res.status, message);
+  }
+  return (await res.json()).url as string;
+}

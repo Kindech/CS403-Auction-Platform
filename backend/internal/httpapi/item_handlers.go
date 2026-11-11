@@ -15,7 +15,8 @@ import (
 type createItemRequest struct {
 	Title         string    `json:"title"`
 	Description   string    `json:"description"`
-	ImageURL      string    `json:"image_url"`
+	ImageURL      string    `json:"image_url"`  // older clients: a single photo
+	ImageURLs     []string  `json:"image_urls"` // photos in display order; the first is the cover
 	StartingPrice float64   `json:"starting_price"`
 	BidIncrement  float64   `json:"bid_increment"`
 	StartTime     time.Time `json:"start_time"`
@@ -56,6 +57,7 @@ func (s *Server) handleCreateItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Title = strings.TrimSpace(req.Title)
+	req.ImageURLs = normalizeImageURLs(req.ImageURL, req.ImageURLs)
 	if msg := validateItem(req, time.Now()); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
 		return
@@ -65,7 +67,8 @@ func (s *Server) handleCreateItem(w http.ResponseWriter, r *http.Request) {
 		SellerID:      claims.UserID,
 		Title:         req.Title,
 		Description:   req.Description,
-		ImageURL:      req.ImageURL,
+		ImageURL:      coverImage(req.ImageURLs),
+		ImageURLs:     req.ImageURLs,
 		StartingPrice: req.StartingPrice,
 		BidIncrement:  req.BidIncrement,
 		StartTime:     req.StartTime,

@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"auction/backend/internal/config"
+	"auction/backend/internal/imagestore"
 	"auction/backend/internal/ws"
 )
 
@@ -18,10 +19,11 @@ type Server struct {
 	pool  *pgxpool.Pool
 	redis *redis.Client
 	wsDeps *ws.Deps
+	images *imagestore.Store // nil when no object store is configured
 }
 
-func NewServer(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, wsDeps *ws.Deps) *Server {
-	return &Server{cfg: cfg, pool: pool, redis: rdb, wsDeps: wsDeps}
+func NewServer(cfg config.Config, pool *pgxpool.Pool, rdb *redis.Client, wsDeps *ws.Deps, images *imagestore.Store) *Server {
+	return &Server{cfg: cfg, pool: pool, redis: rdb, wsDeps: wsDeps, images: images}
 }
 
 func (s *Server) Router() http.Handler {
@@ -42,6 +44,7 @@ func (s *Server) Router() http.Handler {
 		r.Get("/items/{id}", s.handleGetItem)
 		r.Get("/items/{id}/bids", s.handleItemBids)
 		r.Post("/items", s.requireAuth(s.handleCreateItem))
+		r.Post("/uploads/images", s.requireAuth(s.handleUploadImage))
 	})
 
 	r.Get("/ws/auctions/{id}", func(w http.ResponseWriter, r *http.Request) {

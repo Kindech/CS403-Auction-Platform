@@ -94,17 +94,17 @@ func CreateItem(ctx context.Context, pool *pgxpool.Pool, it models.Item) (models
 		status = models.ItemLive
 	}
 	err := pool.QueryRow(ctx,
-		`INSERT INTO items (seller_id, title, description, image_url, starting_price, bid_increment, start_time, end_time, status)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+		`INSERT INTO items (seller_id, title, description, image_url, image_urls, starting_price, bid_increment, start_time, end_time, status)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		 RETURNING id, created_at, status`,
-		it.SellerID, it.Title, it.Description, it.ImageURL, it.StartingPrice, it.BidIncrement, it.StartTime, it.EndTime, status,
+		it.SellerID, it.Title, it.Description, it.ImageURL, it.ImageURLs, it.StartingPrice, it.BidIncrement, it.StartTime, it.EndTime, status,
 	).Scan(&it.ID, &it.CreatedAt, &it.Status)
 	it.CurrentPrice = it.StartingPrice
 	return it, err
 }
 
 const itemSelectCols = `
-	i.id, i.seller_id, u.display_name, i.title, i.description, i.image_url,
+	i.id, i.seller_id, u.display_name, i.title, i.description, i.image_url, i.image_urls,
 	i.starting_price, i.bid_increment, i.start_time, i.end_time, i.status,
 	i.winner_id, w.display_name, i.final_price, i.created_at`
 
@@ -113,7 +113,7 @@ func scanItem(row pgx.Row) (models.Item, error) {
 	var winnerID, winnerName *string
 	var finalPrice *float64
 	err := row.Scan(
-		&it.ID, &it.SellerID, &it.SellerName, &it.Title, &it.Description, &it.ImageURL,
+		&it.ID, &it.SellerID, &it.SellerName, &it.Title, &it.Description, &it.ImageURL, &it.ImageURLs,
 		&it.StartingPrice, &it.BidIncrement, &it.StartTime, &it.EndTime, &it.Status,
 		&winnerID, &winnerName, &finalPrice, &it.CreatedAt,
 	)

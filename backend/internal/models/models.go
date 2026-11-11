@@ -26,7 +26,8 @@ type Item struct {
 	SellerName     string     `json:"seller_name,omitempty"`
 	Title          string     `json:"title"`
 	Description    string     `json:"description"`
-	ImageURL       string     `json:"image_url"`
+	ImageURL       string     `json:"image_url"`  // cover photo, = ImageURLs[0]
+	ImageURLs      []string   `json:"image_urls"` // all photos in display order
 	StartingPrice  float64    `json:"starting_price"`
 	BidIncrement   float64    `json:"bid_increment"`
 	CurrentPrice   float64    `json:"current_price"`

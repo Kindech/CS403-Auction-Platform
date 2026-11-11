@@ -58,6 +58,13 @@ spec:
             - { name: HTTP_ADDR, value: ":8080" }
             - { name: BID_RATE_LIMIT_PER_SEC, value: "10" }
             - { name: CORS_ORIGIN, value: "http://localhost:8080" }
+            # item photos (k8s/seaweedfs.yaml)
+            - { name: S3_ENDPOINT, value: "seaweedfs:8333" }
+            - { name: S3_BUCKET, value: "item-images" }
+            - name: S3_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: backend-secrets, key: S3_ACCESS_KEY } }
+            - name: S3_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: backend-secrets, key: S3_SECRET_KEY } }
           ports:
             - containerPort: 8080
           # Short probe periods so a crashed pod leaves the Service's

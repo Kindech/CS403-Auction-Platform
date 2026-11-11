@@ -62,6 +62,10 @@ jobs:
             diff -u "deploy/grafana/provisioning/dashboards/json/$f" "k8s/monitoring/dashboards/$f"
           done
 
+      # same reason: the SeaweedFS S3 identities (item photo storage)
+      - name: compose and k8s SeaweedFS S3 config are identical
+        run: diff -u deploy/seaweedfs/s3.json k8s/seaweedfs-s3.json
+
   frontend:
     name: Frontend (React + TypeScript)
     runs-on: ubuntu-latest

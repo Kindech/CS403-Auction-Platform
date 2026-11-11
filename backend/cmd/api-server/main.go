@@ -12,6 +12,7 @@ import (
 	"auction/backend/internal/config"
 	"auction/backend/internal/db"
 	"auction/backend/internal/httpapi"
+	"auction/backend/internal/imagestore"
 	"auction/backend/internal/kafkabus"
 	"auction/backend/internal/models"
 	"auction/backend/internal/redisstate"
@@ -59,6 +60,31 @@ func main() {
 		}
 	}()
 
+	// Item photos. Like Kafka above, the bucket is set up in the background so
+	// a slow-starting MinIO only delays uploads, not the whole api-server.
+	var images *imagestore.Store
+	if cfg.S3Endpoint != "" {
+		images, err = imagestore.New(cfg.S3Endpoint, cfg.S3AccessKey, cfg.S3SecretKey, cfg.S3Bucket)
+		if err != nil {
+			log.Fatalf("image store: %v", err)
+		}
+		go func() {
+			for backoff := time.Second; ctx.Err() == nil; backoff = min(backoff*2, 30*time.Second) {
+				actx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				err := images.EnsureBucket(actx)
+				cancel()
+				if err == nil {
+					log.Printf("images: bucket %s on %s ready", cfg.S3Bucket, cfg.S3Endpoint)
+					return
+				}
+				log.Printf("images: set up bucket %s (retrying in %s): %v", cfg.S3Bucket, backoff, err)
+				time.Sleep(backoff)
+			}
+		}()
+	} else {
+		log.Printf("images: S3_ENDPOINT not set, photo upload disabled")
+	}
+
 	hub := ws.NewHub()
 	go hub.RelayEvents(ctx, rdb)
 
@@ -77,7 +103,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewServer(cfg, pool, rdb, wsDeps).Router(),
+		Handler:           httpapi.NewServer(cfg, pool, rdb, wsDeps, images).Router(),
 		ReadHeaderTimeout: 10 * time.Second, // a client can't hold a connection by sending headers slowly
 		IdleTimeout:       2 * time.Minute,
 	}
