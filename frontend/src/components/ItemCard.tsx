@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 import type { Item } from "../types";
 import { formatMoney, formatCountdown } from "../lib/format";
+import { ItemPhoto } from "./ItemPhoto";
 
 const STATUS_BADGE: Record<Item["status"], string> = {
   upcoming: "bg-blue-50 text-blue-700 border-blue-200",
@@ -34,13 +35,11 @@ export function ItemCard({ item }: { item: Item }) {
       className="block bg-white rounded-xl shadow-card hover:shadow-card-hover transition-all overflow-hidden border border-slate-100 hover:border-gold/40 group"
     >
       <div className="relative aspect-4/3 overflow-hidden bg-paper">
-        {item.image_url && (
-          <img
-            src={item.image_url}
-            alt={item.title}
-            className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
-          />
-        )}
+        <ItemPhoto
+          src={item.image_url}
+          alt={item.title}
+          className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+        />
         <span
           className={`absolute top-3 left-3 inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold border backdrop-blur-sm ${STATUS_BADGE[item.status]}`}
         >

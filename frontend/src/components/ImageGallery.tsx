@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from "react";
+import { ItemPhoto } from "./ItemPhoto";
 
 interface Props {
   images: string[];
@@ -14,11 +15,7 @@ export function ImageGallery({ images, alt, children }: Props) {
   return (
     <div className="mb-4">
       <div className="relative aspect-4/3 bg-paper rounded-xl overflow-hidden border border-slate-100">
-        {current ? (
-          <img src={current} alt={alt} className="w-full h-full object-cover" />
-        ) : (
-          <div className="w-full h-full grid place-items-center text-ink-muted/60 text-sm">ไม่มีรูปภาพ</div>
-        )}
+        <ItemPhoto src={current} alt={alt} className="w-full h-full object-cover" />
         {images.length > 1 && (
           <>
             <button
