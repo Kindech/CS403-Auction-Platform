@@ -74,6 +74,9 @@ func (h *Hub) send(c *Client, payload []byte) {
 // computed as at most two payload variants total, not one marshal per
 // connection.
 func (h *Hub) BroadcastToRoom(itemID string, ev Event) {
+	if ev.Type == EventPriceUpdate && ev.NameOwnerID != "" {
+		ev.BidderKey = models.BidderKey(ev.ItemID, ev.NameOwnerID)
+	}
 	unmasked, err := json.Marshal(ev)
 	if err != nil {
 		log.Printf("ws: marshal event: %v", err)

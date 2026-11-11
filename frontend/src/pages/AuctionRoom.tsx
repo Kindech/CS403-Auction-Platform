@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { useAuctionSocket } from "../lib/useAuctionSocket";
 import { useAuth } from "../lib/auth";
 import { itemImages, type Bid, type Item } from "../types";
 import { ImageGallery } from "../components/ImageGallery";
+import { BidHistoryTable, BidStatCards, LiveBidFeed, formatDateTime } from "../components/BidHistory";
+import { computeBidStats } from "../lib/bidStats";
 import { formatMoney, formatCountdown } from "../lib/format";
 import { isValidAmount, leadingBidId, minNextBid as nextBidFloor } from "../lib/bidding";
 import { WinnerAnnouncement } from "../components/WinnerAnnouncement";
@@ -33,6 +35,7 @@ export function AuctionRoom() {
   const [now, setNow] = useState(() => Date.now());
   const [popup, setPopup] = useState<string | null>(null);
   const [infoPopup, setInfoPopup] = useState<string | null>(null);
+  const [tab, setTab] = useState<"details" | "history">("history");
 
   const { state, sendBid } = useAuctionSocket(id);
 
@@ -104,6 +107,8 @@ export function AuctionRoom() {
   useEffect(() => {
     if (!state.ended) return;
     refreshBids();
+    // and the item, for winner_id (is the viewer the winner?) and final_price
+    if (id) api.get<Item>(`/items/${id}`).then(setItem).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.ended]);
 
@@ -111,6 +116,9 @@ export function AuctionRoom() {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // recomputed on every new bid, so the stat cards move in real time
+  const stats = useMemo(() => computeBidStats(bids, item?.starting_price ?? 0), [bids, item?.starting_price]);
 
   if (!item) return <p className="text-ink-muted">กำลังโหลด...</p>;
 
@@ -150,6 +158,7 @@ export function AuctionRoom() {
         winnerName={state.winnerName ?? item.winner_name ?? null}
         finalPrice={state.finalPrice ?? item.final_price ?? null}
         bids={bids}
+        viewerIsWinner={!!user && !!item.winner_id && user.id === item.winner_id}
       />
     );
   }
@@ -205,9 +214,10 @@ export function AuctionRoom() {
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+    <div>
       {rejectPopup}
       {infoPopupEl}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
       <div>
         <ImageGallery images={itemImages(item)} alt={item.title}>
           {item.status === "live" && (
@@ -218,8 +228,7 @@ export function AuctionRoom() {
           )}
         </ImageGallery>
         <h1 className="font-serif-display text-2xl font-bold text-ink">{item.title}</h1>
-        <p className="text-ink-muted mt-2 text-sm">{item.description}</p>
-        <p className="text-xs text-ink-muted/70 mt-3">
+        <p className="text-xs text-ink-muted/70 mt-2">
           ผู้ขาย: {item.seller_name} · {state.connected ? "🟢 เชื่อมต่อสด" : "🟠 กำลังเชื่อมต่อใหม่..."}
         </p>
       </div>
@@ -268,40 +277,65 @@ export function AuctionRoom() {
           )}
         </div>
 
-        <h2 className="text-lg font-serif-display font-semibold text-ink mb-3">ประวัติการเสนอราคาแบบเรียลไทม์</h2>
-        <div className="max-h-80 overflow-y-auto rounded-xl border border-slate-100 bg-white shadow-card">
-          <table className="w-full text-sm text-left">
-            <thead className="bg-paper text-ink-muted text-xs uppercase tracking-wider sticky top-0">
-              <tr>
-                <th className="px-4 py-2.5">ผู้เสนอราคา</th>
-                <th className="px-4 py-2.5">จำนวนเงิน</th>
-                <th className="px-4 py-2.5">สถานะ</th>
-              </tr>
-            </thead>
-            <tbody>
-              {bids.map((b) => (
-                <tr key={b.id} className="border-t border-slate-100">
-                  <td className="px-4 py-2.5">{b.user_name}</td>
-                  <td className="px-4 py-2.5 font-mono-digits">{formatMoney(b.amount)}</td>
-                  <td
-                    className={`px-4 py-2.5 font-medium ${
-                      b.id === leaderId ? "text-emerald-600" : b.status === "accepted" ? "text-ink-muted" : "text-red-500"
-                    }`}
-                  >
-                    {b.id === leaderId ? "สูงสุด" : b.status === "accepted" ? "ถูกแซง" : "ถูกปฏิเสธ"}
-                  </td>
-                </tr>
-              ))}
-              {bids.length === 0 && (
-                <tr>
-                  <td colSpan={3} className="px-4 py-6 text-center text-ink-muted">
-                    ยังไม่มีการเสนอราคา
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+      </div>
+      </div>
+
+      <div className="mt-10">
+        <div role="tablist" className="flex gap-6 border-b border-slate-200 mb-6">
+          {(
+            [
+              ["details", "รายละเอียดสินค้า"],
+              ["history", `ประวัติการประมูล (${stats.bidCount.toLocaleString()})`],
+            ] as const
+          ).map(([key, label]) => (
+            <button
+              key={key}
+              role="tab"
+              aria-selected={tab === key}
+              onClick={() => setTab(key)}
+              className={`-mb-px pb-3 text-sm font-semibold border-b-2 transition-colors ${
+                tab === key ? "border-gold text-ink" : "border-transparent text-ink-muted hover:text-ink"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
+
+        {tab === "details" ? (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-2 rounded-xl border border-slate-100 bg-white shadow-card p-6">
+              <h3 className="font-serif-display font-semibold text-ink mb-2">รายละเอียด</h3>
+              <p className="text-sm text-ink-muted whitespace-pre-line">{item.description || "ผู้ขายไม่ได้ใส่รายละเอียด"}</p>
+            </div>
+            <dl className="rounded-xl border border-slate-100 bg-white shadow-card p-6 text-sm h-fit">
+              {(
+                [
+                  ["ราคาเริ่มต้น", formatMoney(item.starting_price)],
+                  ["เพิ่มราคาขั้นต่ำครั้งละ", formatMoney(minIncrement)],
+                  ["เริ่มประมูล", formatDateTime(item.start_time)],
+                  ["สิ้นสุดประมูล", formatDateTime(new Date(endTimeMs).toISOString())],
+                  ["ผู้ขาย", item.seller_name ?? "-"],
+                ] as const
+              ).map(([k, v], i) => (
+                <div key={k} className={`flex justify-between gap-4 py-2 ${i ? "border-t border-slate-100" : ""}`}>
+                  <dt className="text-ink-muted">{k}</dt>
+                  <dd className="text-ink text-right">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <BidStatCards stats={stats} startingPrice={item.starting_price} />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              <div className="lg:col-span-2">
+                <BidHistoryTable bids={bids} leaderId={leaderId} />
+              </div>
+              <LiveBidFeed bids={bids} nowMs={now} connected={state.connected} />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

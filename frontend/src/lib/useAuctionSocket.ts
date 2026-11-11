@@ -87,6 +87,7 @@ export function useAuctionSocket(itemID: string | undefined) {
                         item_id: itemID!,
                         user_id: "",
                         user_name: data.bidder_name,
+                        bidder_key: data.bidder_key,
                         amount: data.price,
                         status: "accepted",
                         created_at: new Date().toISOString(),

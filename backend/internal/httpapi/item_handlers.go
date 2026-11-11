@@ -114,6 +114,7 @@ func (s *Server) handleItemBids(w http.ResponseWriter, r *http.Request) {
 	}
 	viewerID := s.optionalUserID(r)
 	for i := range bids {
+		bids[i].BidderKey = models.BidderKey(id, bids[i].UserID)
 		if bids[i].UserID != viewerID {
 			bids[i].UserName = models.MaskDisplayName(bids[i].UserName)
 			bids[i].UserID = "" // a stable ID would link the masked name across items

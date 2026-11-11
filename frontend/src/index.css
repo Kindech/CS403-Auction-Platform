@@ -25,3 +25,9 @@ body {
   @apply bg-cream text-ink font-sans;
   margin: 0;
 }
+
+/* a new bid sliding into the live feed */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-6px); background-color: rgb(201 169 97 / 0.25); }
+  to { opacity: 1; transform: none; }
+}

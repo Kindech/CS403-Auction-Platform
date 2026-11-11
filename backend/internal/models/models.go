@@ -53,6 +53,7 @@ type Bid struct {
 	ItemID     string    `json:"item_id"`
 	UserID     string    `json:"user_id,omitempty"` // blanked for other viewers: it would link a masked name across items
 	UserName   string    `json:"user_name,omitempty"`
+	BidderKey  string    `json:"bidder_key,omitempty"` // per-item pseudonym, see BidderKey
 	ItemTitle  string    `json:"item_title,omitempty"`
 	Amount     float64   `json:"amount"`
 	Status     BidStatus `json:"status"`

@@ -42,6 +42,7 @@ export interface Bid {
   item_title?: string;
   user_id?: string; // only sent to the bidder themselves
   user_name?: string;
+  bidder_key?: string; // same per bidder within one item; counts distinct bidders behind masked names
   amount: number;
   status: BidStatus;
   reason?: string;
@@ -53,6 +54,7 @@ export interface WSEvent {
   item_id: string;
   price?: number;
   bidder_name?: string;
+  bidder_key?: string;
   end_time_ms?: number;
   min_increment?: number;
   soft_extended?: boolean;

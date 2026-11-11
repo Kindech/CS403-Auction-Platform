@@ -12,7 +12,8 @@ type Event struct {
 	// price_update / sync
 	Price        float64 `json:"price,omitempty"`
 	BidderName   string  `json:"bidder_name,omitempty"`
-	EndTimeMs    int64   `json:"end_time_ms,omitempty"`
+	BidderKey    string  `json:"bidder_key,omitempty"` // per-item pseudonym (models.BidderKey), set by BroadcastToRoom
+	EndTimeMs   int64   `json:"end_time_ms,omitempty"`
 	MinIncrement float64 `json:"min_increment,omitempty"`
 	SoftExtended bool    `json:"soft_extended,omitempty"`
 
