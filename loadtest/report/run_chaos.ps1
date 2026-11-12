@@ -2,7 +2,9 @@
 # started and ended (Thai local time), to line it up with Grafana.
 # Usage: powershell -ExecutionPolicy Bypass -File loadtest\report\run_chaos.ps1 -Script tc06_worker_crash_replay.sh
 #        powershell -ExecutionPolicy Bypass -File loadtest\report\run_chaos.ps1 -Script tc08_scaleout_fanout.mjs
-param([Parameter(Mandatory = $true)][string]$Script)
+#        add -KeepData to leave the test rows in Postgres (to view audit_log in pgAdmin)
+param([Parameter(Mandatory = $true)][string]$Script, [switch]$KeepData)
+if ($KeepData) { $env:KEEP_DATA = "1" }
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $path = Join-Path $root "loadtest\chaos\$Script"
 $env:TARGET = "k8s"

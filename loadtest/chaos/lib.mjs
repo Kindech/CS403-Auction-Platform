@@ -307,6 +307,11 @@ export function percentile(values, p) {
 // those rows (see TC-14), and their bid.dropped audit entries would be left
 // behind.
 export async function cleanup({ itemId, userIds = [], expectedBids = 0 }) {
+  // KEEP_DATA=1 leaves the rows in place (e.g. to screenshot audit_log in pgAdmin)
+  if (process.env.KEEP_DATA === "1") {
+    console.log(`    kept (KEEP_DATA=1): ${itemId ? `item ${itemId}` : `${userIds.length} users`}`);
+    return;
+  }
   if (itemId && expectedBids > 0) {
     await waitFor(() => Number(psql(`SELECT count(*) FROM bids WHERE item_id='${itemId}'`)) >= expectedBids, 15000, "bid rows to be flushed")
       .catch((e) => console.log(`  (cleanup: ${e.message})`));

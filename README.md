@@ -281,6 +281,13 @@ pgAdmin จำการเชื่อมต่อนี้ไว้ (เก็�
 เชื่อมต่อแล้วกางไปที่ `auction → Databases → auction → Schemas → public → Tables` จะเห็น
 `users`, `items`, `bids` และ `audit_log`
 
+**ดู Postgres บน Kubernetes ด้วย pgAdmin ตัวเดียวกัน:** เปิด port-forward ทิ้งไว้ในอีก terminal
+```powershell
+kubectl -n auction port-forward svc/postgres 5433:5432
+```
+แล้วลงทะเบียน server อีกตัวด้วย Host `host.docker.internal`, Port `5433` (ช่องอื่นเหมือนตารางข้างบน)
+ถ้าเชื่อมต่อไม่ได้ ให้เช็กว่า container `deploy-pgadmin-1` ยังรันอยู่ และ port-forward ยังไม่หลุด
+
 `audit_log` (`backend/migrations/0002_audit_log.sql`) เป็น timeline เดียวที่เรียงตามเวลาของ
 ทั้งวงจรบัญชีและการประมูล — `user.register`, `user.login`, `user.login_failed`,
 `user.login_locked` (ดูเรื่อง lockout ด้านล่าง), `item.create`, `bid.accepted`, `bid.rejected`
@@ -669,7 +676,9 @@ powershell -ExecutionPolicy Bypass -File loadtest\report\run_chaos.ps1 -Script t
 ```powershell
 powershell -ExecutionPolicy Bypass -File loadtest\report\show_bids.ps1 -Title "TC-03%" -Summary
 ```
-รายละเอียดอยู่ใน [`loadtest/README.md`](loadtest/README.md#เก็บผลลงรายงาน-loadtestreport)
+เพิ่ม `-KeepData` ท้ายคำสั่ง `run_chaos.ps1` ถ้าต้องการให้ข้อมูลทดสอบ (เช่น `audit_log`) ค้างไว้ดูใน pgAdmin หลังรันจบ
+(ปกติ test ลบข้อมูลตัวเองตอนจบ) — ตรวจว่าใช้ได้โดยดูว่าตอนจบพิมพ์ `kept (KEEP_DATA=1): ...` แทนการลบ
+รายละเอียดและคำสั่งลบข้อมูลทีหลังอยู่ใน [`loadtest/README.md`](loadtest/README.md#เก็บผลลงรายงาน-loadtestreport)
 
 ผลสำคัญ: ยิงโหลด 300 VU ต่อเนื่อง HPA เพิ่ม api-server จาก 2 → 6 pod แล้วลดกลับเมื่อโหลดหยุด
 และการ scale จริงเจอปัญหาที่ compose ไม่เคยเจอ — connection pool ของ 6 pod รวมกันเกิน

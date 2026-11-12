@@ -98,6 +98,7 @@ connection ของเจ้าของบิด (ให้ผู้ใช้�
 | สคริปต์ | ทำอะไร |
 |---|---|
 | `run_chaos.ps1 -Script <ไฟล์>` | รัน chaos test ใน `chaos/` ด้วย `TARGET=k8s` (`.mjs` ด้วย node, `.sh` ด้วย Git Bash) พิมพ์เวลาเริ่ม/จบไว้ตั้งช่วงเวลาใน Grafana |
+| `run_chaos.ps1 -Script <ไฟล์> -KeepData` | เหมือนข้างบน แต่**ไม่ลบข้อมูลทดสอบ**ตอนจบ (ตั้ง `KEEP_DATA=1` ให้ `cleanup()` ใน `chaos/lib.mjs`) ใช้กับ test ที่เป็น `.mjs` เพื่อเปิดดู `audit_log`/`bids` ใน pgAdmin หลังรันจบ |
 | `show_bids.ps1 -Title "TC-02%"` | ตาราง `bids` ของสินค้าล่าสุดที่ชื่อตรง (เวลา, ผู้บิด, จำนวน, status, reason) |
 | `show_bids.ps1 -Title "TC-03%" -Summary` | นับบิดแยก status/reason + จำนวนผู้บิด, เวลาบิดแรก/สุดท้าย, ผู้นำ (สำหรับ test ที่มีบิดหลักหมื่น) |
 | `show_item.ps1 -Title "TC-05%"` | เวลาเริ่ม/จบ (เห็น `end_time` ที่ anti-snipe เลื่อน), status, ราคาจบ, ผู้ชนะ |
@@ -113,6 +114,30 @@ powershell -ExecutionPolicy Bypass -File loadtest\report\show_bids.ps1 -Title "T
 ```powershell
 powershell -ExecutionPolicy Bypass -File loadtest\report\run_chaos.ps1 -Script tc06_worker_crash_replay.sh
 ```
+
+**เก็บข้อมูลไว้ดูทีหลัง (`-KeepData`)** ปกติ chaos test ลบ `audit_log`, `bids`, `items`, `users` ของตัวเองตอนจบ
+ถ้าจะ capture `audit_log` ใน pgAdmin ให้รันด้วย `-KeepData` แทน:
+```powershell
+powershell -ExecutionPolicy Bypass -File loadtest\report\run_chaos.ps1 -Script tc13_close_with_backlog.mjs -KeepData
+```
+วิธีเทส: ช่วง "Cleaning up test data" ต้องพิมพ์ `kept (KEEP_DATA=1): item <id>` แทนการลบ แล้ว query นี้ต้องเจอแถว:
+```powershell
+"SELECT action, details FROM audit_log WHERE entity_id IN (SELECT id::text FROM items WHERE title LIKE 'TC-13%') ORDER BY created_at" | kubectl -n auction exec -i postgres-0 -- psql -U auction -d auction
+```
+ดูเสร็จแล้วลบเอง (บัญชีทดสอบเป็น `tcNN-...@chaos.local`, เปลี่ยน `TC-13`/`tc13` ตามที่รัน):
+```powershell
+@"
+BEGIN;
+CREATE TEMP TABLE u AS SELECT id FROM users WHERE email LIKE 'tc13-%@chaos.local';
+CREATE TEMP TABLE i AS SELECT id FROM items WHERE title LIKE 'TC-13%';
+DELETE FROM audit_log WHERE entity_id IN (SELECT id::text FROM i) OR user_id IN (SELECT id FROM u) OR entity_id IN (SELECT id::text FROM u);
+DELETE FROM bids WHERE item_id IN (SELECT id FROM i) OR user_id IN (SELECT id FROM u);
+DELETE FROM items WHERE id IN (SELECT id FROM i);
+DELETE FROM users WHERE id IN (SELECT id FROM u);
+COMMIT;
+"@ | kubectl -n auction exec -i postgres-0 -- psql -U auction -d auction -v ON_ERROR_STOP=1
+```
+(TC-14 ลบสินค้าหนึ่งชิ้นกลางการทดสอบ `audit_log` ของชิ้นนั้นจึงไม่ผูกกับ `items` แล้ว ต้องลบด้วย `entity_id` ที่สคริปต์พิมพ์ไว้)
 
 ผลทั้ง 14 ตัวจากรอบเก็บผลอยู่ในตาราง "ผลทดสอบ" ของ [`k8s/README.md`](../k8s/README.md)
 
